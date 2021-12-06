@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use quick_xml::{Writer, events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event}};
-use rio_api::model::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+use rio_api::model::{BlankNode, Literal, NamedNode, Subject, Term, Triple};
 use std::{cmp::Ordering, collections::{HashMap, HashSet, VecDeque}, fmt::{Debug, Formatter}};
 use std::{self, cell::RefCell, fmt,
           hash::{Hash,Hasher},
@@ -43,7 +43,7 @@ fn map_err(error: quick_xml::Error) -> io::Error {
 }
 
 
-// We need a complete copy of the while data model because we need to
+// We need a complete copy of the whole data model because we need to
 // be able to copy and cache items without worrying too much about
 // lifetimes and without allocation. AsRef<str> supports both of
 // this, assuming that there is an Rc in the way somewhere
@@ -253,57 +253,59 @@ impl From<Literal<'_>> for PLiteral<String> {
 }
 
 #[derive(Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Hash)]
-pub enum PNamedOrBlankNode<A:AsRef<str>> {
+pub enum PSubject<A:AsRef<str>> {
     NamedNode(PNamedNode<A>),
     BlankNode(PBlankNode<A>),
 }
 
-impl<A:AsRef<str>> fmt::Display for PNamedOrBlankNode<A> {
+impl<A:AsRef<str>> fmt::Display for PSubject<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let nn:NamedOrBlankNode<'_> = self.into();
+        let nn:Subject<'_> = self.into();
         write!(f, "{}", nn)
     }
 }
 
-impl<'a, A:AsRef<str>> From<&'a PNamedOrBlankNode<A>> for NamedOrBlankNode<'a> {
-    fn from(anbn: &'a PNamedOrBlankNode<A>) -> Self {
+impl<'a, A:AsRef<str>> From<&'a PSubject<A>> for Subject<'a> {
+    fn from(anbn: &'a PSubject<A>) -> Self {
         match anbn {
-            PNamedOrBlankNode::NamedNode(nn) =>
-                NamedOrBlankNode::NamedNode(nn.into()),
-            PNamedOrBlankNode::BlankNode(bn) =>
-                NamedOrBlankNode::BlankNode(bn.into())
+            PSubject::NamedNode(nn) =>
+                Subject::NamedNode(nn.into()),
+            PSubject::BlankNode(bn) =>
+                Subject::BlankNode(bn.into())
         }
     }
 }
 
-impl From<NamedOrBlankNode<'_>> for PNamedOrBlankNode<String> {
-    fn from(nbn: NamedOrBlankNode<'_>) -> Self {
+impl From<Subject<'_>> for PSubject<String> {
+    fn from(nbn: Subject<'_>) -> Self {
         match nbn {
-            NamedOrBlankNode::NamedNode(nn) =>
-                PNamedOrBlankNode::NamedNode(nn.into()),
-            NamedOrBlankNode::BlankNode(bn) =>
-                PNamedOrBlankNode::BlankNode(bn.into()),
+            Subject::NamedNode(nn) =>
+                PSubject::NamedNode(nn.into()),
+            Subject::BlankNode(bn) =>
+                PSubject::BlankNode(bn.into()),
+            Subject::Triple(_) =>
+                panic!("Subject triples are not supported")
         }
     }
 }
 
-impl<A:AsRef<str>> From<PNamedNode<A>> for PNamedOrBlankNode<A> {
+impl<A:AsRef<str>> From<PNamedNode<A>> for PSubject<A> {
     fn from(nn: PNamedNode<A>) -> Self {
-        PNamedOrBlankNode::NamedNode(nn)
+        PSubject::NamedNode(nn)
     }
 }
 
-impl<A:AsRef<str>> From<PBlankNode<A>> for PNamedOrBlankNode<A> {
+impl<A:AsRef<str>> From<PBlankNode<A>> for PSubject<A> {
     fn from(nn: PBlankNode<A>) -> Self {
-        PNamedOrBlankNode::BlankNode(nn)
+        PSubject::BlankNode(nn)
     }
 }
 
-impl<A:AsRef<str>> AsRef<str> for PNamedOrBlankNode<A> {
+impl<A:AsRef<str>> AsRef<str> for PSubject<A> {
     fn as_ref(&self) -> &str {
         match self {
-            PNamedOrBlankNode::NamedNode(nn) => nn.as_ref(),
-            PNamedOrBlankNode::BlankNode(bn) => bn.as_ref(),
+            PSubject::NamedNode(nn) => nn.as_ref(),
+            PSubject::BlankNode(bn) => bn.as_ref(),
         }
     }
 }
@@ -315,23 +317,23 @@ pub enum PTerm<A:AsRef<str>> {
     Literal(PLiteral<A>),
 }
 
-impl<A:AsRef<str>> PartialEq<PNamedOrBlankNode<A>> for PTerm<A> {
-    fn eq(&self, other: &PNamedOrBlankNode<A>) -> bool {
+impl<A:AsRef<str>> PartialEq<PSubject<A>> for PTerm<A> {
+    fn eq(&self, other: &PSubject<A>) -> bool {
         match (self, other) {
-            (Self::NamedNode(nn), PNamedOrBlankNode::NamedNode(onn))
+            (Self::NamedNode(nn), PSubject::NamedNode(onn))
                 => nn.iri.as_ref() == onn.iri.as_ref(),
-            (Self::BlankNode(bn), PNamedOrBlankNode::BlankNode(obn))
+            (Self::BlankNode(bn), PSubject::BlankNode(obn))
                 => bn.id.as_ref() == obn.id.as_ref(),
             _ => false
         }
     }
 }
 
-impl<A:AsRef<str>> From<PNamedOrBlankNode<A>> for PTerm<A> {
-    fn from(nbn: PNamedOrBlankNode<A>) -> Self {
+impl<A:AsRef<str>> From<PSubject<A>> for PTerm<A> {
+    fn from(nbn: PSubject<A>) -> Self {
         match nbn {
-            PNamedOrBlankNode::NamedNode(nn) => nn.into(),
-            PNamedOrBlankNode::BlankNode(bn) => bn.into(),
+            PSubject::NamedNode(nn) => nn.into(),
+            PSubject::BlankNode(bn) => bn.into(),
         }
     }
 }
@@ -365,6 +367,8 @@ impl From<Term<'_>> for PTerm<String> {
                 PTerm::BlankNode(bn.into()),
             Term::Literal(l) =>
                 PTerm::Literal(l.into()),
+            Term::Triple(_) =>
+                panic!("Subject Triples are not supported")
         }
     }
 }
@@ -383,13 +387,13 @@ impl<A:AsRef<str>> From<PNamedNode<A>> for PTerm<A> {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PTriple<A: AsRef<str>> {
-    pub subject: PNamedOrBlankNode<A>,
+    pub subject: PSubject<A>,
     pub predicate: PNamedNode<A>,
     pub object: PTerm<A>
 }
 
 impl<A:AsRef<str>> PTriple<A> {
-    pub fn new(subject:PNamedOrBlankNode<A>,
+    pub fn new(subject:PSubject<A>,
                predicate:PNamedNode<A>,
                object:PTerm<A>) -> PTriple<A> {
         PTriple{subject, predicate, object}
@@ -463,7 +467,7 @@ trait TripleLike<A>
     fn accept(&mut self, t:PTriple<A>) -> Option<PTriple<A>>;
 
     /// What is the subject of the triple like
-    fn subject(&self) -> &PNamedOrBlankNode<A>;
+    fn subject(&self) -> &PSubject<A>;
 
     fn literal_objects(&self) -> Vec<&PTriple<A>>;
 
@@ -506,7 +510,7 @@ where A: AsRef<str> + Clone + PartialEq
         }
     }
 
-    fn subject(&self) -> &PNamedOrBlankNode<A> {
+    fn subject(&self) -> &PSubject<A> {
         // There should be no empty instances, so this should be safe
         &self.vec[0].subject
     }
@@ -527,7 +531,7 @@ where A: AsRef<str> + Clone + PartialEq
 // as a the subject of the first node
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PTripleSeq<A:AsRef<str>> {
-    list_seq: VecDeque<(PNamedOrBlankNode<A>, Option<PTriple<A>>, PTriple<A>)>,
+    list_seq: VecDeque<(PSubject<A>, Option<PTriple<A>>, PTriple<A>)>,
 }
 
 impl<A:AsRef<str> + Eq> From<PTripleSeq<A>> for Vec<PMultiTriple<A>> {
@@ -553,7 +557,7 @@ impl<A:AsRef<str> + Clone> PTripleSeq<A> {
 
     pub fn from_end(t:PTriple<A>) -> PTripleSeq<A> {
         let mut seq = PTripleSeq{list_seq: vec![].into()};
-        if let PNamedOrBlankNode::BlankNode(_) = &t.subject {
+        if let PSubject::BlankNode(_) = &t.subject {
             seq.list_seq.push_front((t.subject.clone(), None, t));
         } else {
             todo!("This shouldn't happen")
@@ -594,7 +598,7 @@ where A: AsRef<str> + Clone + Debug + Eq + PartialEq
         }
 
         if let PTerm::BlankNode(bn) = &t.object {
-            if let &PNamedOrBlankNode::BlankNode(ref snn) = self.subject() {
+            if let &PSubject::BlankNode(ref snn) = self.subject() {
                 if t.is_collection_rest() && snn == bn {
                     self.list_seq.push_front((t.subject.clone(), None, t));
                     return None;
@@ -605,7 +609,7 @@ where A: AsRef<str> + Clone + Debug + Eq + PartialEq
         Some(t)
     }
 
-    fn subject(&self) -> &PNamedOrBlankNode<A> {
+    fn subject(&self) -> &PSubject<A> {
         &self.list_seq[0].0
     }
 
@@ -669,7 +673,7 @@ where A: AsRef<str> + Clone + Debug + Eq + PartialEq {
         }
     }
 
-    fn subject(&self) -> &PNamedOrBlankNode<A> {
+    fn subject(&self) -> &PSubject<A> {
         match self {
             Self::PMultiTriple(mt) => mt.subject(),
             Self::PTripleSeq(seq) => seq.subject(),
@@ -713,10 +717,10 @@ impl<A> PChunk<A>
 where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
 {
     pub fn normalize(v:Vec<PTriple<A>>) -> Self {
-        let mut etv:IndexMap<PNamedOrBlankNode<A>, PMultiTriple<A>> = Default::default();
+        let mut etv:IndexMap<PSubject<A>, PMultiTriple<A>> = Default::default();
         let mut seq:Vec<PTripleSeq<A>> = vec![];
-        let mut seq_rest:HashMap<PNamedOrBlankNode<A>, PTriple<A>> = Default::default();
-        let mut seq_first:HashMap<PNamedOrBlankNode<A>, PTriple<A>> = Default::default();
+        let mut seq_rest:HashMap<PSubject<A>, PTriple<A>> = Default::default();
+        let mut seq_first:HashMap<PSubject<A>, PTriple<A>> = Default::default();
 
         'top: for t in v {
 
@@ -729,7 +733,7 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
             // We have a collection part. Remember for later
             if t.is_collection_rest() {
                 if let PTerm::BlankNode(ref bn) = &t.object {
-                    seq_rest.insert(PNamedOrBlankNode::BlankNode(bn.clone()), t);
+                    seq_rest.insert(PSubject::BlankNode(bn.clone()), t);
                 }
                 continue 'top;
             }
@@ -782,7 +786,7 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
     }
 
     pub fn sort(&mut self) {
-        &self.v.make_contiguous()
+        let _ = &self.v.make_contiguous()
             .sort_by(
                 |a, b| {
                     match (a, b) {
@@ -806,12 +810,12 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
                                 amt.subject(), bmt.subject()
                             ) {
                                 (
-                                    PNamedOrBlankNode::NamedNode(_),
-                                    PNamedOrBlankNode::BlankNode(_),
+                                    PSubject::NamedNode(_),
+                                    PSubject::BlankNode(_),
                                 ) => Ordering::Less,
                                 (
-                                    PNamedOrBlankNode::BlankNode(_),
-                                    PNamedOrBlankNode::NamedNode(_),
+                                    PSubject::BlankNode(_),
+                                    PSubject::NamedNode(_),
                                 ) => Ordering::Greater,
                                 _ => Ordering::Equal
                             }
@@ -846,8 +850,8 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
     fn find_subject(&mut self, bn:&PBlankNode<A>) -> Option<PEpandedTriple<A>> {
         if self.by_sub.is_empty() {
             for v in self.v.iter() {
-                if let PNamedOrBlankNode::BlankNode(n) = v.subject() {
-                    &self.by_sub.insert(n.clone(), v.clone());
+                if let PSubject::BlankNode(n) = v.subject() {
+                    let _ = &self.by_sub.insert(n.clone(), v.clone());
                 }
             }
         }
@@ -1013,10 +1017,10 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq,
             };
 
         match triple_like.subject() {
-            PNamedOrBlankNode::NamedNode(ref n) => {
+            PSubject::NamedNode(ref n) => {
                 description_open.push_attribute(("rdf:about", n.iri.as_ref()))
             }
-            PNamedOrBlankNode::BlankNode(_) => {
+            PSubject::BlankNode(_) => {
                 // Empty
             }
         }
@@ -1146,7 +1150,7 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq,
             for i in v {
                 chunk.insert(i.into())
             }
-            if let PNamedOrBlankNode::BlankNode(n) = subj {
+            if let PSubject::BlankNode(n) = subj {
                 return self.format_expanded(&chunk.find_subject(&n).unwrap(), chunk);
             }
             todo!("We shouldn't get here");
@@ -1277,7 +1281,7 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq,
     }
 
     pub fn format(&mut self, triple:PTriple<A>) -> Result<(), io::Error> {
-        &self.1.push(triple);
+        let _ = &self.1.push(triple);
         Ok(())
     }
 
