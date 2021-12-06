@@ -624,7 +624,7 @@ where A: AsRef<str> + Clone + Debug + Eq + PartialEq
 
 // All the different forms of RDF subgraph
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum PEpandedTriple<A:AsRef<str>> {
+pub enum PExpandedTriple<A:AsRef<str>> {
     PMultiTriple(PMultiTriple<A>),
     PTripleSeq(PTripleSeq<A>),
 }
@@ -639,7 +639,7 @@ where A: AsRef<str> + Clone + Debug + Eq + PartialEq
     }
 }
 
-impl<A> From<PTriple<A>> for PEpandedTriple<A>
+impl<A> From<PTriple<A>> for PExpandedTriple<A>
 where A: AsRef<str> + Clone + Debug + Eq + PartialEq
 {
     fn from(t: PTriple<A>) -> Self {
@@ -648,23 +648,23 @@ where A: AsRef<str> + Clone + Debug + Eq + PartialEq
     }
 }
 
-impl<A> From<PMultiTriple<A>> for PEpandedTriple<A>
+impl<A> From<PMultiTriple<A>> for PExpandedTriple<A>
 where A: AsRef<str> + Clone + Debug + Eq + PartialEq
 {
     fn from(t: PMultiTriple<A>) -> Self {
-        PEpandedTriple::PMultiTriple(t)
+        PExpandedTriple::PMultiTriple(t)
     }
 }
 
-impl<A> From<PTripleSeq<A>> for PEpandedTriple<A>
+impl<A> From<PTripleSeq<A>> for PExpandedTriple<A>
 where A: AsRef<str> + Clone + Debug + Eq + PartialEq
 {
     fn from(t: PTripleSeq<A>) -> Self {
-        PEpandedTriple::PTripleSeq(t)
+        PExpandedTriple::PTripleSeq(t)
     }
 }
 
-impl<A> TripleLike<A> for PEpandedTriple<A>
+impl<A> TripleLike<A> for PExpandedTriple<A>
 where A: AsRef<str> + Clone + Debug + Eq + PartialEq {
     fn accept(&mut self, triple: PTriple<A>) -> Option<PTriple<A>> {
         match self {
@@ -707,9 +707,9 @@ where A: AsRef<str> + Clone + Debug + Eq + PartialEq {
 ///   apperance as an object (TODO: Not implemented yet!)
 #[derive(Debug)]
 pub struct PChunk<A:AsRef<str>>{
-    v: VecDeque<PEpandedTriple<A>>,
-    r: HashSet<PEpandedTriple<A>>,
-    by_sub: HashMap<PBlankNode<A>, PEpandedTriple<A>>
+    v: VecDeque<PExpandedTriple<A>>,
+    r: HashSet<PExpandedTriple<A>>,
+    by_sub: HashMap<PBlankNode<A>, PExpandedTriple<A>>
 }
 
 
@@ -766,18 +766,18 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
             }
         }
 
-        let etv:VecDeque<PEpandedTriple<A>> = etv.into_iter()
+        let etv:VecDeque<PExpandedTriple<A>> = etv.into_iter()
             .map(|(_k, v)| v.into())
             .chain(
                 seq.into_iter()
-                    .map(|s| PEpandedTriple::PTripleSeq(s))
+                    .map(|s| PExpandedTriple::PTripleSeq(s))
             )
             .collect();
 
         PChunk{v:etv, r:HashSet::new(), by_sub:HashMap::new()}
     }
 
-    pub fn from_raw(vec:Vec<PEpandedTriple<A>>) -> Self {
+    pub fn from_raw(vec:Vec<PExpandedTriple<A>>) -> Self {
         PChunk{v:vec.into(), r:HashSet::new(), by_sub:HashMap::new()}
     }
 
@@ -791,18 +791,18 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
                 |a, b| {
                     match (a, b) {
                         (
-                            PEpandedTriple::PMultiTriple(_),
-                            PEpandedTriple::PTripleSeq(_)
+                            PExpandedTriple::PMultiTriple(_),
+                            PExpandedTriple::PTripleSeq(_)
                         ) => Ordering::Less,
                         (
-                            PEpandedTriple::PTripleSeq(_),
-                            PEpandedTriple::PMultiTriple(_)
+                            PExpandedTriple::PTripleSeq(_),
+                            PExpandedTriple::PMultiTriple(_)
                         ) => Ordering::Greater,
                         (
-                            PEpandedTriple::PMultiTriple(
+                            PExpandedTriple::PMultiTriple(
                                 amt
                             ),
-                            PEpandedTriple::PMultiTriple(
+                            PExpandedTriple::PMultiTriple(
                                 bmt
                             )
                         ) => {
@@ -826,12 +826,12 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
             );
     }
 
-    pub fn insert(&mut self, et:PEpandedTriple<A>){
+    pub fn insert(&mut self, et:PExpandedTriple<A>){
         self.v.push_back(et);
         self.by_sub.clear()
     }
 
-    pub fn next(&mut self) -> Option<PEpandedTriple<A>> {
+    pub fn next(&mut self) -> Option<PExpandedTriple<A>> {
         loop {
             if let Some(front) = self.v.pop_front() {
                 if !self.r.contains(&front) {
@@ -843,11 +843,11 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq
         }
     }
 
-    fn remove_et(&mut self, et: &PEpandedTriple<A>) {
+    fn remove_et(&mut self, et: &PExpandedTriple<A>) {
         self.r.insert(et.clone());
     }
 
-    fn find_subject(&mut self, bn:&PBlankNode<A>) -> Option<PEpandedTriple<A>> {
+    fn find_subject(&mut self, bn:&PBlankNode<A>) -> Option<PExpandedTriple<A>> {
         if self.by_sub.is_empty() {
             for v in self.v.iter() {
                 if let PSubject::BlankNode(n) = v.subject() {
@@ -1082,7 +1082,7 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq,
             }
             PTerm::BlankNode(n) => {
                 if let Some(t) = chunk.find_subject(n) {
-                    if let PEpandedTriple::PTripleSeq(ref seq) = t {
+                    if let PExpandedTriple::PTripleSeq(ref seq) = t {
                         if !seq.has_literal() {
                             property_open.push_attribute(("rdf:parseType", "Collection"));
                         }
@@ -1195,16 +1195,16 @@ where A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq,
         Ok(())
     }
 
-    fn format_expanded(&mut self, expanded:&PEpandedTriple<A>,
+    fn format_expanded(&mut self, expanded:&PExpandedTriple<A>,
                        chunk:&mut PChunk<A>,
     ) -> Result<(), io::Error> {
         chunk.remove_et(expanded);
 
         match expanded {
-            PEpandedTriple::PMultiTriple(ref mt) => {
+            PExpandedTriple::PMultiTriple(ref mt) => {
                 self.format_multi(mt, chunk)?;
             }
-            PEpandedTriple::PTripleSeq(ref seq) =>{
+            PExpandedTriple::PTripleSeq(ref seq) =>{
                 self.format_seq(seq, chunk)?;
             }
         }
