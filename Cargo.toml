@@ -13,8 +13,8 @@ license = "LGPL-3.0"
 [dependencies]
 indexmap = "1.6.1"
 quick-xml = "0.21"
-rio_api= "0.6.1"
+rio_api= "0.7.1"
 
 [dev-dependencies]
 pretty_assertions = "0.6.1"
-rio_turtle = "0.6.1"
+rio_turtle = "0.7.1"
