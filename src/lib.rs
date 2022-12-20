@@ -902,9 +902,9 @@ where
     }
 
     fn write_declaration(mut self) -> Result<Self, io::Error> {
-        self.write_event(Event::Decl(BytesDecl::new(b"1.0", Some(b"UTF-8"), None)))
+        self.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
             .map_err(map_err)?;
-        let mut rdf_open = BytesStart::borrowed_name(b"rdf:RDF");
+        let mut rdf_open = BytesStart::new("rdf:RDF");
         self.write_prefix(&mut rdf_open)?;
         self.write_event(Event::Start(rdf_open)).map_err(map_err)?;
         Ok(self)
@@ -940,7 +940,7 @@ where
         self.write_complete_open()?;
         match event {
             Event::Start(bs) => {
-                self.open_tag_stack.push(bs.name().to_vec());
+                self.open_tag_stack.push(bs.name().into_inner().to_vec());
                 self.last_open_tag = Some(bs.to_owned());
             }
             _ => panic!("Only pass a start event to write start"),
@@ -961,7 +961,7 @@ where
         if let Some(empty) = self.last_open_tag.take() {
             self.write_event(Event::Empty(empty)).map_err(map_err)
         } else {
-            self.write_event(Event::End(BytesEnd::owned(close)))
+            self.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(&close))))
                 .map_err(map_err)
         }
     }
@@ -969,9 +969,9 @@ where
     fn bytes_start_iri<'a>(&mut self, nn: &'a PNamedNode<A>) -> BytesStart<'a> {
         let (iri_protocol_and_host, iri_qname) = nn.split_iri();
         if let Some(iri_ns_prefix) = &self.config.prefix.get(iri_protocol_and_host) {
-            BytesStart::owned_name(format!("{}:{}", &iri_ns_prefix, &iri_qname))
+            BytesStart::new(format!("{}:{}", &iri_ns_prefix, &iri_qname))
         } else {
-            let mut bs = BytesStart::owned_name(iri_qname.as_bytes());
+            let mut bs = BytesStart::new(iri_qname);
             bs.push_attribute(("xmlns", iri_protocol_and_host));
             bs
         }
@@ -992,7 +992,7 @@ where
                     panic!("BNodes cannot be typed, I think")
                 }
             }
-            None => BytesStart::borrowed_name(b"rdf:Description"),
+            None => BytesStart::new("rdf:Description"),
         };
 
         match triple_like.subject() {
@@ -1104,7 +1104,7 @@ where
                 };
                 self.write_start(Event::Start(property_open))
                     .map_err(map_err)?;
-                self.write_event(Event::Text(BytesText::from_plain_str(&content.as_ref())))
+                self.write_event(Event::Text(BytesText::new(&content.as_ref())))
                     .map_err(map_err)?;
             }
         };
@@ -1156,7 +1156,7 @@ where
                     // render the object, but not the property which
                     // is the collection joiner
                     PTerm::NamedNode(_) => {
-                        let property_open = BytesStart::borrowed_name(b"rdf:Description");
+                        let property_open = BytesStart::new("rdf:Description");
                         self.format_object(property_open, &triple.object, chunk, true)?;
                         self.write_close()?;
                     }
@@ -1245,7 +1245,7 @@ where
 
         self.finish_chunk()?;
 
-        self.write_event(Event::End(BytesEnd::borrowed(b"rdf:RDF")))
+        self.write_event(Event::End(BytesEnd::new("rdf:RDF")))
             .map_err(map_err)?;
 
         Ok(self.writer.into_inner())
