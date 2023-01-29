@@ -46,11 +46,7 @@ pub fn is_name_char(c: char) -> bool {
 }
 
 fn map_err(error: quick_xml::Error) -> io::Error {
-    if let quick_xml::Error::Io(error) = error {
-        error
-    } else {
-        io::Error::new(io::ErrorKind::Other, error)
-    }
+    io::Error::new(io::ErrorKind::Other, error)
 }
 
 // We need a complete copy of the whole data model because we need to
