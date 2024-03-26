@@ -49,17 +49,16 @@ fn map_err(error: quick_xml::Error) -> io::Error {
     io::Error::new(io::ErrorKind::Other, error)
 }
 
-// We need a complete copy of the whole data model because we need to
-// be able to copy and cache items without worrying too much about
-// lifetimes and without allocation. AsRef<str> supports both of
-// this, assuming that there is an Rc in the way somewhere
+// Begin RDF data model
 
+/// An RDF IRI
 #[derive(Ord, PartialOrd, Clone)]
 pub struct PNamedNode<A: AsRef<str>> {
     pub iri: A,
+    // true if we have previously split iri
     position_cache: RefCell<bool>,
-    position_base: RefCell<Option<usize>>,
-    position_add: RefCell<Option<usize>>,
+    // position at which the fragment occurs
+    position_split: RefCell<Option<usize>>,
 }
 
 impl<A: AsRef<str>> PNamedNode<A> {
@@ -67,8 +66,7 @@ impl<A: AsRef<str>> PNamedNode<A> {
         PNamedNode {
             iri,
             position_cache: RefCell::new(false),
-            position_base: RefCell::new(None),
-            position_add: RefCell::new(None),
+            position_split: RefCell::new(None),
         }
     }
 }
@@ -79,8 +77,7 @@ impl<A: Debug + AsRef<str>> Debug for PNamedNode<A> {
             PNamedNode {
                 ref iri,
                 position_cache: _,
-                position_base: _,
-                position_add: _,
+                position_split: _,
             } => {
                 let mut debug_trait_builder = f.debug_struct("PNamedNode");
                 let _ = debug_trait_builder.field("iri", &&(*iri));
@@ -109,31 +106,29 @@ impl<A: AsRef<str>> PNamedNode<A> {
         let iri = self.iri.as_ref();
 
         let mut position_cache = self.position_cache.borrow_mut();
-        let mut position_base = self.position_base.borrow_mut();
-        let mut position_add = self.position_add.borrow_mut();
+        let mut position_split = self.position_split.borrow_mut();
+        let position_base;
+        let position_add;
 
         if !*position_cache {
             *position_cache = true;
-            *position_base = iri.rfind(|c| !is_name_char(c) || c == ':');
-            if let Some(position_base) = *position_base {
-                *position_add = iri[position_base..].find(|c| is_name_start_char(c) && c != ':')
+            position_base = iri.rfind(|c| !is_name_char(c) || c == ':');
+            if let Some(position_base) = position_base {
+                position_add = iri[position_base..].find(|c| is_name_start_char(c) && c != ':');
+                if let Some(position_add) = position_add {
+                    *position_split = Some(position_base + position_add);
+                }
             }
         }
 
-        if let Some(position_base) = *position_base {
-            if let Some(position_add) = *position_add {
-                (
-                    &iri[..position_base + position_add],
-                    &iri[position_base + position_add..],
-                )
-            } else {
-                (iri, "")
-            }
+        if let Some(position_split) = *position_split {
+            (&iri[..position_split], &iri[position_split..])
         } else {
             (iri, "")
         }
     }
 }
+
 
 impl<A: AsRef<str>> fmt::Display for PNamedNode<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -444,6 +439,9 @@ impl From<Triple<'_>> for PTriple<String> {
     }
 }
 
+// End basic RDF data model
+
+/// Triple like objects contain a single subject but potentially multiple normal triples.
 trait TripleLike<A>
 where
     A: AsRef<str> + Clone,
@@ -451,16 +449,18 @@ where
     /// Can a new Triple be accepted onto this TripleLike.
     fn accept(&mut self, t: PTriple<A>) -> Option<PTriple<A>>;
 
-    /// What is the subject of the triple like
+    /// What is the subject of the triple like object
     fn subject(&self) -> &PSubject<A>;
 
+    /// Return all triples that have a literal as object
     fn literal_objects(&self) -> Vec<&PTriple<A>>;
 
+    /// Return all tripes
     fn find_typed(&self) -> Option<&PTriple<A>>;
 }
 
-// A set of triples with a shared subject
-// All the triples in `vec` should start with `subject`.
+/// A multi-triple contains multiple triples with the same shared subject
+/// These will be rendered as a shared node
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PMultiTriple<A: AsRef<str>> {
     vec: Vec<PTriple<A>>,
@@ -514,8 +514,7 @@ where
     }
 }
 
-// A set of terms that should be rendered as a RDF list, using first
-// as a the subject of the first node
+/// Contains a set of triples in a collection
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PTripleSeq<A: AsRef<str>> {
     list_seq: VecDeque<(PSubject<A>, Option<PTriple<A>>, PTriple<A>)>,
@@ -610,7 +609,7 @@ where
     }
 }
 
-// All the different forms of RDF subgraph
+/// Any form of triple container
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum PExpandedTriple<A: AsRef<str>> {
     PMultiTriple(PMultiTriple<A>),
@@ -687,7 +686,8 @@ where
     }
 }
 
-/// A chunk of RDF that should that should be coherent.
+/// A set of triple like objects that represents a coherent chunk
+///
 /// Current invariants:
 ///   - each subject should appear only once (i.e. all subjects are
 ///   grouped in PMultiTriple, or AsRefSeq)
@@ -697,23 +697,42 @@ where
 ///   apperance as an object (TODO: Not implemented yet!)
 #[derive(Debug)]
 pub struct PChunk<A: AsRef<str>> {
+    // Ordered list of triples
     v: VecDeque<PExpandedTriple<A>>,
+    // While we render by working through the ordered list, we
+    // sometimes will render later triples sooner, if we have common
+    // subjects for instance. We do this by adding here rather than
+    // extracting from the VecDeque, presumably because it is faster.
+    // Checking whether this makes any difference at some point would
+    // be sensible, because it makes the code more complex
     r: HashSet<PExpandedTriple<A>>,
+    // Fast lookup by subject
     by_sub: HashMap<PBlankNode<A>, PExpandedTriple<A>>,
+    // bnode object count -- we need to know how many times a bnode appears as an object
+    // because if it occurs more than once we cannot elide it
+    bnode_object_count: HashMap<PBlankNode<A>,usize>,
 }
 
 impl<A> PChunk<A>
 where
     A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq,
 {
+    /// Given a set of triples normalize these to a chunk wth appropriate prettification applied
     pub fn normalize(v: Vec<PTriple<A>>) -> Self {
         let mut etv: IndexMap<PSubject<A>, PMultiTriple<A>> = Default::default();
         let mut seq: Vec<PTripleSeq<A>> = vec![];
         let mut seq_rest: HashMap<PSubject<A>, PTriple<A>> = Default::default();
         let mut seq_first: HashMap<PSubject<A>, PTriple<A>> = Default::default();
+        let mut bnode_object_count:HashMap<PBlankNode<A>, usize> = Default::default();
 
         'top: for t in v {
-            // We have a collection add. Create a new seq and store it
+            if let PTerm::BlankNode(ref bn) = &t.object {
+                bnode_object_count.entry(bn.clone())
+                    .and_modify(|e| *e += 1)
+                    .or_insert(1);
+            }
+
+            // We have a collection end. Create a new seq and store it
             if t.is_collection_end() {
                 seq.push(PTripleSeq::from_end(t));
                 continue 'top;
@@ -732,7 +751,7 @@ where
             }
 
             // We have something else. Combine it with existing multi
-            // triples
+            // triples.
             if let Some(multi) = etv.get_mut(&t.subject) {
                 multi.accept(t);
             } else {
@@ -741,6 +760,7 @@ where
             }
         }
 
+        // We grow the sequence form the beginning
         for s in seq.iter_mut() {
             loop {
                 if let Some(t) = seq_first.remove(s.subject()) {
@@ -765,6 +785,7 @@ where
             v: etv,
             r: HashSet::new(),
             by_sub: HashMap::new(),
+            bnode_object_count
         }
     }
 
@@ -773,6 +794,7 @@ where
             v: vec.into(),
             r: HashSet::new(),
             by_sub: HashMap::new(),
+            bnode_object_count: HashMap::new(),
         }
     }
 
@@ -781,6 +803,7 @@ where
             v: vec![].into(),
             r: HashSet::new(),
             by_sub: HashMap::new(),
+            bnode_object_count: HashMap::new(),
         }
     }
 
@@ -821,6 +844,7 @@ where
     }
 
     fn find_subject(&mut self, bn: &PBlankNode<A>) -> Option<PExpandedTriple<A>> {
+        // Build up a cache
         if self.by_sub.is_empty() {
             for v in self.v.iter() {
                 if let PSubject::BlankNode(n) = v.subject() {
@@ -834,6 +858,10 @@ where
             }
         }
         None
+    }
+
+    fn object_count(&self, bn:&PBlankNode<A>) -> usize {
+        self.bnode_object_count.get(bn).copied().unwrap_or(0)
     }
 }
 
@@ -976,16 +1004,22 @@ where
     fn format_head<'a, T: TripleLike<A> + Debug>(
         &mut self,
         triple_like: &'a T,
-        _chunk: &PChunk<A>,
+        chunk: &PChunk<A>,
     ) -> Result<Vec<&'a PTriple<A>>, io::Error> {
         let mut triples_rendered = vec![];
         let mut description_open = match triple_like.find_typed() {
             Some(t) => {
                 if let PTerm::NamedNode(nn) = &t.object {
                     triples_rendered.push(t);
-                    self.bytes_start_iri(nn)
+                    let mut bs = self.bytes_start_iri(nn);
+                    if let PSubject::BlankNode(bn) = &t.subject {
+                        if chunk.object_count(bn) > 1 {
+                            bs.push_attribute(("rdf:nodeID", bn.as_ref()));
+                        }
+                    };
+                    bs
                 } else {
-                    panic!("BNodes cannot be typed, I think")
+                    panic!("Bnodes cannot by typed I think")
                 }
             }
             None => BytesStart::new("rdf:Description"),
@@ -1064,21 +1098,24 @@ where
                 self.write_start(Event::Start(property_open))
                     .map_err(map_err)?;
             }
-            PTerm::BlankNode(n) => {
-                if let Some(t) = chunk.find_subject(n) {
-                    if let PExpandedTriple::PTripleSeq(ref seq) = t {
-                        if !seq.has_literal() {
-                            property_open.push_attribute(("rdf:parseType", "Collection"));
+            PTerm::BlankNode(bn) => {
+                if chunk.object_count(bn) == 1 {
+                    if let Some(t) = chunk.find_subject(bn) {
+                        if let PExpandedTriple::PTripleSeq(ref seq) = t {
+                            if !seq.has_literal() {
+                                property_open.push_attribute(("rdf:parseType", "Collection"));
+                            }
                         }
-                    }
-                    self.write_start(Event::Start(property_open))
-                        .map_err(map_err)?;
-                    self.format_expanded(&t, chunk)?;
-                } else {
-                    property_open.push_attribute(("rdf:nodeID", n.id.as_ref()));
-                    self.write_start(Event::Start(property_open))
-                        .map_err(map_err)?;
+                        self.write_start(Event::Start(property_open))
+                            .map_err(map_err)?;
+                        self.format_expanded(&t, chunk)?;
+                        return Ok(())
+                        }
                 }
+
+                property_open.push_attribute(("rdf:nodeID", bn.id.as_ref()));
+                self.write_start(Event::Start(property_open))
+                    .map_err(map_err)?;
             }
             PTerm::Literal(l) => {
                 let content = match l {
@@ -1248,6 +1285,13 @@ where
     }
 }
 
+pub trait RdfXmlFormatter<A: AsRef<str>, W> {
+    fn format(&mut self, triple: PTriple<A>) -> Result<(), io::Error>;
+
+    fn finish(self) -> Result<W, io::Error>;
+}
+
+
 pub struct PrettyRdfXmlFormatter<A: AsRef<str> + Debug, W: Write>(
     ChunkedRdfXmlFormatter<A, W>,
     pub Vec<PTriple<A>>,
@@ -1265,21 +1309,59 @@ where
         ))
     }
 
-    pub fn format(&mut self, triple: PTriple<A>) -> Result<(), io::Error> {
+    pub fn triples(&self) -> Vec<PTriple<A>> {
+        self.1.clone()
+    }
+}
+
+
+impl<A: AsRef<str> + Clone + Debug + Eq + Hash, W: Write> RdfXmlFormatter<A, W> for PrettyRdfXmlFormatter<A, W>{
+    fn format(&mut self, triple: PTriple<A>) -> Result<(), io::Error> {
         let _ = &self.1.push(triple);
         Ok(())
     }
 
-    pub fn triples(&self) -> Vec<PTriple<A>> {
-        self.1.clone()
-    }
-
-    pub fn finish(mut self) -> Result<W, io::Error> {
+    fn finish(mut self) -> Result<W, io::Error> {
         let chk = PChunk::normalize(self.1);
         self.0.format_chunk(chk)?;
         self.0.finish()
     }
 }
+
+pub struct NonPrettyRdfXmlFormatter<A: AsRef<str> + Debug, W: Write>(
+    ChunkedRdfXmlFormatter<A, W>,
+);
+
+impl<A, W> NonPrettyRdfXmlFormatter<A, W>
+where
+    A: AsRef<str> + Clone + Debug + Eq + Hash + PartialEq,
+    W: Write,
+{
+    pub fn new(write: W, config: ChunkedRdfXmlFormatterConfig) -> Result<Self, io::Error> {
+        Ok(NonPrettyRdfXmlFormatter(
+            ChunkedRdfXmlFormatter::new(write, config)?
+        ))
+    }
+}
+
+impl<A, W> RdfXmlFormatter<A, W> for NonPrettyRdfXmlFormatter<A, W>
+where
+    A: AsRef<str> + Clone + Debug + Eq + Hash,
+    W: Write,
+{
+    fn format(&mut self, triple: PTriple<A>) -> Result<(), io::Error> {
+        self.0.chunk_triple(triple);
+        self.0.finish_chunk()?;
+
+        Ok(())
+    }
+
+    fn finish(self) -> Result<W, io::Error> {
+        self.0.finish()
+    }
+}
+
+
 
 #[cfg(test)]
 mod test {
@@ -1496,6 +1578,50 @@ _:genid3 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/19
     </rdf:Description>
 </rdf:RDF>"###,
             spec_prefix(),
+        )
+    }
+
+    #[test]
+    fn owl_breakage() {
+        nt_xml_roundtrip_prefix(
+            r###"<http://www.example.com/iri> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.example.com/iri> <http://www.w3.org/2002/07/owl#versionIRI> <http://www.example.com/viri> .
+<http://www.example.com/iri#r> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://www.example.com/iri#A> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .
+<http://www.example.com/iri#B> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .
+<http://www.example.com/iri#B> <http://www.w3.org/2000/01/rdf-schema#subClassOf> _:genid1 .
+_:genid1 <http://www.w3.org/2002/07/owl#someValuesFrom> <http://www.example.com/iri#A> .
+_:genid1 <http://www.w3.org/2002/07/owl#onProperty> <http://www.example.com/iri#r> .
+_:genid1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Restriction> .
+_:genid2 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Axiom> .
+_:genid2 <http://www.w3.org/2002/07/owl#annotatedSource> <http://www.example.com/iri#B> .
+_:genid2 <http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2000/01/rdf-schema#subClassOf> .
+_:genid2 <http://www.w3.org/2002/07/owl#annotatedTarget> _:genid1 .
+_:genid2 <http://www.w3.org/2000/01/rdf-schema#comment> "Annotation on subclass axiom"@en ."###,
+
+            r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+    <Ontology xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri">
+        <versionIRI xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/viri"/>
+    </Ontology>
+    <ObjectProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#r"/>
+    <Class xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#A"/>
+    <Class xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#B">
+        <subClassOf xmlns="http://www.w3.org/2000/01/rdf-schema#" rdf:nodeID="genid1"/>
+    </Class>
+    <Restriction xmlns="http://www.w3.org/2002/07/owl#" rdf:nodeID="genid1">
+        <someValuesFrom xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#A"/>
+        <onProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#r"/>
+    </Restriction>
+    <Axiom xmlns="http://www.w3.org/2002/07/owl#">
+        <annotatedSource xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#B"/>
+        <annotatedProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.w3.org/2000/01/rdf-schema#subClassOf"/>
+        <annotatedTarget xmlns="http://www.w3.org/2002/07/owl#" rdf:nodeID="genid1"/>
+        <comment xmlns="http://www.w3.org/2000/01/rdf-schema#" xml:lang="en">Annotation on subclass axiom</comment>
+    </Axiom>
+</rdf:RDF>"###,
+
+            spec_prefix()
         )
     }
 }
