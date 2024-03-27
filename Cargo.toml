@@ -1,6 +1,6 @@
 [package]
 name = "pretty_rdf"
-version = "0.4.1-snapshot"
+version = "0.5.0"
 authors = ["Phillip Lord"]
 repository = "https://github.com/phillord/pretty_rdf"
 description = "RDF/XML Pretty Formatting"
