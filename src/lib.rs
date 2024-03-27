@@ -1367,6 +1367,8 @@ where
 mod test {
     use indexmap::{indexmap, IndexMap};
     use pretty_assertions::assert_eq;
+    use rio_api::model::NamedNode;
+    use rio_api::model::Triple;
     use rio_api::parser::TriplesParser;
     use rio_turtle::TurtleError;
 
@@ -1397,6 +1399,21 @@ mod test {
             predicate: PNamedNode::new("http://example.com/p".to_string()).into(),
             object: PNamedNode::new("http://example.com/o".to_string()).into(),
         }
+    }
+
+    #[test]
+    pub fn rio_conversion() {
+        // Test addded because of failure to compile horned-triples
+        // which seemed to argue that this .into conversion was not
+        // possible.
+        let _:PTriple<String> =
+            Triple {
+                subject: NamedNode { iri: "http://example.com/foo" }.into(),
+                predicate: NamedNode { iri: "http://schema.org/sameAs" },
+                object: NamedNode { iri: "http://example.com/foo" }.into(),
+            }.into();
+
+        assert!(true);
     }
 
     #[test]
