@@ -868,6 +868,7 @@ where
 #[derive(Clone, Debug, Default)]
 pub struct ChunkedRdfXmlFormatterConfig {
     indent: usize,
+    base: Option<String>,
     prefix: IndexMap<String, String>,
 }
 
@@ -875,14 +876,21 @@ impl ChunkedRdfXmlFormatterConfig {
     pub fn none() -> Self {
         ChunkedRdfXmlFormatterConfig {
             indent: 0,
+            base: None,
             prefix: IndexMap::new(),
         }
     }
     pub fn all() -> Self {
         ChunkedRdfXmlFormatterConfig {
             indent: 4,
+            base: None,
             prefix: IndexMap::new(),
         }
+    }
+
+    pub fn base(mut self, base: Option<String>) -> Self {
+        self.base = base;
+        self
     }
 
     pub fn prefix(mut self, indexmap: IndexMap<String, String>) -> Self {
@@ -935,6 +943,9 @@ where
     }
 
     fn write_prefix(&mut self, rdf_open: &mut BytesStart<'_>) -> Result<(), io::Error> {
+	if let Some(ref base) = self.config.base {
+            rdf_open.push_attribute(("xmlns", &base[..]));
+        }
         for i in &self.config.prefix {
             let ns = format!("xmlns:{}", &i.1);
             rdf_open.push_attribute((&ns[..], &i.0[..]));
@@ -1371,6 +1382,7 @@ mod test {
     use rio_api::model::Triple;
     use rio_api::parser::TriplesParser;
     use rio_turtle::TurtleError;
+    use rio_xml::RdfXmlError;
 
     use super::{
         ChunkedRdfXmlFormatter, ChunkedRdfXmlFormatterConfig, PBlankNode, PChunk, PNamedNode,
@@ -1527,6 +1539,45 @@ mod test {
         assert_eq!(from_nt(nt).unwrap(), xml);
     }
 
+    fn xml_roundtrip(xml: &str) -> Result<(),Box<dyn std::error::Error>>{
+        let mut source: Vec<PTriple<String>> = vec![];
+
+        let baseiri = oxiri::Iri::parse("http://www.example.com/iri#".to_string())?;
+        rio_xml::RdfXmlParser::new(xml.as_bytes(),
+            Some(baseiri))
+            .parse_all(&mut |rio_triple| -> Result<
+            (),
+            RdfXmlError,
+        > {
+            source.push(rio_triple.into());
+            Ok(())
+        })?;
+
+        let sink = vec![];
+
+        let config = ChunkedRdfXmlFormatterConfig::all()
+            .base(Some("http://www.example.com/iri#".into()))
+            .prefix(indexmap![
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string() => "rdf".to_string()
+            ]
+        );
+
+        let mut f = ChunkedRdfXmlFormatter::new(sink, config)?;
+        let chk = PChunk::normalize(source);
+        //dbg!(&chk);
+        f.format_chunk(chk)?;
+
+        let w = f.finish()?;
+        let roundxml = String::from_utf8(w)?;
+        println!("XML:\n{}\n", xml);
+        println!("Round:\n{}", roundxml);
+
+
+        assert_eq!(xml, roundxml);
+
+        Ok(())
+    }
+
     #[test]
     fn example4_single_triple() {
         nt_xml_roundtrip_prefix(
@@ -1641,4 +1692,29 @@ _:genid2 <http://www.w3.org/2000/01/rdf-schema#comment> "Annotation on subclass 
             spec_prefix()
         )
     }
+
+    #[test]
+    fn example4_xml_roundtrip() {
+        // Test the XML roundtrip machinary
+        xml_roundtrip(
+r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="http://www.w3.org/TR/rdf-syntax-grammar">
+        <title xmlns="http://purl.org/dc/elements/1.1/" rdf:datatype="http://www.w3.org/2001/XMLSchema#string">RDF1.1 XML Syntax</title>
+    </rdf:Description>
+</rdf:RDF>"###
+        ).unwrap();
+    }
+
+    #[test]
+    fn double_rdf_tag() {
+        // Cut down from swrl_rule_basic test
+        // This was producing a tag inside a tag
+        xml_roundtrip(
+            r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+</rdf:RDF>"###
+        ).unwrap()
+    }
+
 }
