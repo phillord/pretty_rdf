@@ -455,7 +455,7 @@ where
     /// Return all triples that have a literal as object
     fn literal_objects(&self) -> Vec<&PTriple<A>>;
 
-    /// Return all tripes
+    /// Return all types
     fn find_typed(&self) -> Option<&PTriple<A>>;
 }
 
@@ -479,8 +479,8 @@ where
         PMultiTriple { vec }
     }
 
-    pub fn len(&self) -> usize {
-        self.vec.len()
+    pub fn triples(&self) -> impl Iterator<Item=&PTriple<A>>{
+        self.vec.iter()
     }
 }
 
@@ -517,7 +517,14 @@ where
 /// Contains a set of triples in a collection
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PTripleSeq<A: AsRef<str>> {
-    list_seq: VecDeque<(PSubject<A>, Option<PTriple<A>>, PTriple<A>)>,
+    list_seq: VecDeque<(
+          // the bnode of this section of the seq
+          PSubject<A>,
+          // the first triple -- as we build from the rest triples this must be option
+          Option<PTriple<A>>,
+          // the rest triple
+          PTriple<A>
+    )>,
 }
 
 impl<A: AsRef<str> + Eq> From<PTripleSeq<A>> for Vec<PMultiTriple<A>> {
@@ -703,11 +710,15 @@ pub struct PChunk<A: AsRef<str>> {
     // sometimes will render later triples sooner, if we have common
     // subjects for instance. We do this by adding here rather than
     // extracting from the VecDeque, presumably because it is faster.
-    // Checking whether this makes any difference at some point would
-    // be sensible, because it makes the code more complex
+    // TODO: Checking whether this makes any difference at some point
+    // would be sensible, because it makes the code more complex. Or
+    // replacing the HashSet with a
+    // IndexMap<(PBlankNode,ExpandedTripleDiscriminant),
+    // PExpandedTriple)>. by_sub could then disappear and become two lookups
     r: HashSet<PExpandedTriple<A>>,
     // Fast lookup by subject
-    by_sub: HashMap<PBlankNode<A>, PExpandedTriple<A>>,
+    // Nodes with the same bnode should be on either or both of a single PMultitriple, or PTripleSeq
+    by_sub: HashMap<PBlankNode<A>, (Option<PMultiTriple<A>>, Option<PTripleSeq<A>>)>,
     // bnode object count -- we need to know how many times a bnode appears as an object
     // because if it occurs more than once we cannot elide it
     bnode_object_count: HashMap<PBlankNode<A>,usize>,
@@ -818,13 +829,13 @@ where
                     _ => Ordering::Equal,
                 }
             }
-            _ => Ordering::Equal,
+            _ => Ordering::Equal
         });
     }
 
     pub fn insert(&mut self, et: PExpandedTriple<A>) {
         self.v.push_back(et);
-        self.by_sub.clear()
+        self.by_sub.clear();
     }
 
     pub fn next(&mut self) -> Option<PExpandedTriple<A>> {
@@ -843,21 +854,40 @@ where
         self.r.insert(et.clone());
     }
 
-    fn find_subject(&mut self, bn: &PBlankNode<A>) -> Option<PExpandedTriple<A>> {
-        // Build up a cache
+    fn find_subject(&mut self, bn: &PBlankNode<A>) -> (Option<PMultiTriple<A>>, Option<PTripleSeq<A>>) {
         if self.by_sub.is_empty() {
             for v in self.v.iter() {
                 if let PSubject::BlankNode(n) = v.subject() {
-                    let _ = &self.by_sub.insert(n.clone(), v.clone());
+                    let e =
+                        self.by_sub.entry(n.clone())
+                            .or_insert((None, None));
+                    match v {
+                        PExpandedTriple::PMultiTriple(mt) => {
+                            (*e).0 = Some(mt.clone())
+                        },
+                        PExpandedTriple::PTripleSeq(ts) => {
+                            (*e).1 = Some(ts.clone())
+                        }
+                    };
                 }
             }
         }
-        if let Some(sub) = self.by_sub.get(bn).cloned() {
-            if !self.r.contains(&sub) {
-                return Some(sub);
+
+        if let Some(mut sub) = self.by_sub.get(bn).cloned() {
+            if let Some(ref mt) = sub.0 {
+                if self.r.contains(&mt.clone().into()) {
+                    sub.0 = None
+                }
             }
+            if let Some(ref ts) = sub.1 {
+                if self.r.contains(&ts.clone().into()) {
+                    sub.1 = None
+                }
+            }
+            return sub;
         }
-        None
+
+        (None, None)
     }
 
     fn object_count(&self, bn:&PBlankNode<A>) -> usize {
@@ -1012,31 +1042,38 @@ where
         }
     }
 
-    fn format_head<'a, T: TripleLike<A> + Debug>(
+    fn format_head<'a> (
         &mut self,
-        triple_like: &'a T,
+        mt: &'a PMultiTriple<A>,
         chunk: &PChunk<A>,
     ) -> Result<Vec<&'a PTriple<A>>, io::Error> {
         let mut triples_rendered = vec![];
-        let mut description_open = match triple_like.find_typed() {
-            Some(t) => {
-                if let PTerm::NamedNode(nn) = &t.object {
-                    triples_rendered.push(t);
+        // oh dearie, dearie me! This is hideous
+        let description_open =
+            if let Some(typ) = mt.find_typed() {
+                if let PTerm::NamedNode(ref nn) = &typ.object {
+                    triples_rendered.push(typ);
                     let mut bs = self.bytes_start_iri(nn);
-                    if let PSubject::BlankNode(bn) = &t.subject {
+                    if let PSubject::BlankNode(ref bn) = &typ.subject {
                         if chunk.object_count(bn) > 1 {
                             bs.push_attribute(("rdf:nodeID", bn.as_ref()));
                         }
-                    };
-                    bs
-                } else {
-                    panic!("Bnodes cannot by typed I think")
+                    }
+                    Some(bs)
+                }
+                else{
+                    None
                 }
             }
-            None => BytesStart::new("rdf:Description"),
-        };
+            else{
+                None
+            };
 
-        match triple_like.subject() {
+        let mut description_open = description_open.unwrap_or_else(
+            || BytesStart::new("rdf:Description")
+        );
+
+        match mt.subject() {
             PSubject::NamedNode(ref n) => {
                 description_open.push_attribute(("rdf:about", n.iri.as_ref()))
             }
@@ -1047,7 +1084,7 @@ where
 
         // TODO: Shares lots of code with format_property
         // TODO: check all properties unique!!
-        for literal_t in triple_like.literal_objects() {
+        for literal_t in mt.literal_objects() {
             if let PTerm::Literal(l) = &literal_t.object {
                 match l {
                     PLiteral::Simple { value } => {
@@ -1111,19 +1148,57 @@ where
             }
             PTerm::BlankNode(bn) => {
                 if chunk.object_count(bn) == 1 {
-                    if let Some(t) = chunk.find_subject(bn) {
-                        if let PExpandedTriple::PTripleSeq(ref seq) = t {
+                    match chunk.find_subject(bn) {
+                        (None, Some(seq)) => {
                             if !seq.has_literal() {
                                 property_open.push_attribute(("rdf:parseType", "Collection"));
                             }
-                        }
-                        self.write_start(Event::Start(property_open))
-                            .map_err(map_err)?;
-                        self.format_expanded(&t, chunk)?;
-                        return Ok(())
-                        }
-                }
+                            self.write_start(Event::Start(property_open))
+                                .map_err(map_err)?;
 
+                            self.format_expanded(&seq.clone().into(), chunk)?;
+                            return Ok(())
+                        }
+                        (Some(mt), None) => {
+                            self.write_start(Event::Start(property_open))
+                                .map_err(map_err)?;
+                            self.format_expanded(&mt.clone().into(), chunk)?;
+                            return Ok(())
+                        }
+                        (Some(mut mt), Some(seq)) => {
+                            self.write_start(Event::Start(property_open))
+                                .map_err(map_err)?;
+
+                            chunk.remove_et(&seq.clone().into());
+                            chunk.remove_et(&mt.clone().into());
+
+                            // As we have both types of edge, we need
+                            // not to render the seq as a seq but as a
+                            // set of triples.
+                            let mut v: Vec<PMultiTriple<A>> = seq.into();
+
+                            // The first triple of this will accept
+                            // the other triples of the multi triple
+                            // as they are guaranteed to have the same bnode
+                            for t in v[0].triples(){
+                                assert!(
+                                    mt.accept(t.clone()).is_none(),
+                                    "The subject of the sequence and other triples should be the same at this point"
+                                );
+                            }
+                            v[0] = mt;
+
+
+                            for i in v {
+                                self.format_multi(&i, chunk)?;
+                            }
+
+                            return Ok(())
+                        }
+                        (None, None) => {
+                        }
+                    }
+                }
                 property_open.push_attribute(("rdf:nodeID", bn.id.as_ref()));
                 self.write_start(Event::Start(property_open))
                     .map_err(map_err)?;
@@ -1183,9 +1258,22 @@ where
                 chunk.insert(i.into())
             }
             if let PSubject::BlankNode(n) = subj {
-                return self.format_expanded(&chunk.find_subject(&n).unwrap(), chunk);
+                  return match chunk.find_subject(&n) {
+                            (Some(mt), None) => {
+                                self.format_expanded(&mt.clone().into(), chunk)
+                            }
+                            (None, Some(seq)) => {
+                                self.format_expanded(&seq.clone().into(), chunk)
+                            }
+                            (Some(mt), Some(seq)) => {
+                                self.format_expanded(&mt.clone().into(), chunk)?;
+                                self.format_expanded(&seq.clone().into(), chunk)
+                            }
+                            _ => {
+                                todo!("We shouldn't get here");
+                            }
+                  }
             }
-            todo!("We shouldn't get here");
         }
 
         for tup in seq.list_seq.iter() {
@@ -1193,8 +1281,19 @@ where
                 match &triple.object {
                     // Just render in place
                     PTerm::BlankNode(bn) => {
-                        if let Some(t) = chunk.find_subject(bn) {
-                            self.format_expanded(&t, chunk)?;
+                        match chunk.find_subject(bn) {
+                            (Some(mt), None) => {
+                                self.format_expanded(&mt.clone().into(), chunk)?;
+                            }
+                            (None, Some(seq)) => {
+                                self.format_expanded(&seq.clone().into(), chunk)?;
+                            }
+                            (Some(mt), Some(seq)) => {
+                                self.format_expanded(&mt.clone().into(), chunk)?;
+                                self.format_expanded(&seq.clone().into(), chunk)?;
+                            }
+                            _ => {
+                            }
                         }
                     }
                     // render the object, but not the property which
@@ -1413,6 +1512,26 @@ mod test {
         }
     }
 
+    fn some_seq() -> PChunk<String> {
+        PChunk::normalize(vec![
+            PTriple {
+                subject: PBlankNode::new("seq0".to_string()).into(),
+                predicate: PNamedNode::new("http://example.com/p".to_string()).into(),
+                object: PNamedNode::new("http://example.com/o".to_string()).into(),
+            },
+            PTriple{
+                subject: PBlankNode::new("seq0".to_string()).into(),
+                predicate: PNamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#first".to_string().into()),
+                object: PBlankNode::new("seq1".to_string()).into(),
+            },
+            PTriple{
+                subject: PBlankNode::new("seq0".to_string()).into(),
+                predicate: PNamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#rest".to_string().into()),
+                object: PNamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#nil".to_string()).into(),
+            }
+        ])
+    }
+
     #[test]
     pub fn rio_conversion() {
         // Test addded because of failure to compile horned-triples
@@ -1481,6 +1600,18 @@ mod test {
         assert_eq!(chk.next(), Some(PTripleSeq::empty().into()));
     }
 
+    #[test]
+    pub fn multi_chunk_find_subject_with_seq() {
+        let mut chk = some_seq();
+
+        let sub = chk.find_subject(&PBlankNode::new("seq0".to_string()));
+
+        assert!(matches!{
+            sub,
+            (Some(_), Some(_))
+        })
+    }
+
     fn spec_prefix() -> IndexMap<&'static str, &'static str> {
         indexmap![
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
@@ -1539,41 +1670,49 @@ mod test {
         assert_eq!(from_nt(nt).unwrap(), xml);
     }
 
-    fn xml_roundtrip(xml: &str) -> Result<(),Box<dyn std::error::Error>>{
+    fn xml_roundtrip(xml: &str, prefix: Option<IndexMap<&str, &str>>) -> Result<(),Box<dyn std::error::Error>>{
+        xml_from_to(xml, xml, prefix)
+    }
+
+    fn xml_from_to(xml_from: &str, xml_to: &str, prefix: Option<IndexMap<&str, &str>>) -> Result<(),Box<dyn std::error::Error>>{
         let mut source: Vec<PTriple<String>> = vec![];
 
         let baseiri = oxiri::Iri::parse("http://www.example.com/iri#".to_string())?;
-        rio_xml::RdfXmlParser::new(xml.as_bytes(),
+
+        rio_xml::RdfXmlParser::new(xml_from.as_bytes(),
             Some(baseiri))
             .parse_all(&mut |rio_triple| -> Result<
             (),
             RdfXmlError,
         > {
+            //dbg!(rio_triple);
             source.push(rio_triple.into());
             Ok(())
         })?;
 
         let sink = vec![];
 
+        let prefix = prefix.unwrap_or_else(|| indexmap![
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf"
+        ]);
+        let prefix = prefix.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+
         let config = ChunkedRdfXmlFormatterConfig::all()
             .base(Some("http://www.example.com/iri#".into()))
-            .prefix(indexmap![
-                "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string() => "rdf".to_string()
-            ]
-        );
+            .prefix(prefix);
 
         let mut f = ChunkedRdfXmlFormatter::new(sink, config)?;
-        let chk = PChunk::normalize(source);
-        //dbg!(&chk);
+        let mut chk = PChunk::normalize(source);
+        chk.sort();
         f.format_chunk(chk)?;
 
         let w = f.finish()?;
         let roundxml = String::from_utf8(w)?;
-        println!("XML:\n{}\n", xml);
+        println!("XML_from:\n{}\n", xml_from);
+        println!("XML_to:\n{}\n", xml_to);
         println!("Round:\n{}", roundxml);
 
-
-        assert_eq!(xml, roundxml);
+        assert_eq!(xml_to, roundxml);
 
         Ok(())
     }
@@ -1702,7 +1841,8 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
     <rdf:Description rdf:about="http://www.w3.org/TR/rdf-syntax-grammar">
         <title xmlns="http://purl.org/dc/elements/1.1/" rdf:datatype="http://www.w3.org/2001/XMLSchema#string">RDF1.1 XML Syntax</title>
     </rdf:Description>
-</rdf:RDF>"###
+</rdf:RDF>"###,
+            None
         ).unwrap();
     }
 
@@ -1713,8 +1853,163 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
         xml_roundtrip(
             r###"<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-</rdf:RDF>"###
+</rdf:RDF>"###,
+            None
         ).unwrap()
     }
 
+
+    #[test]
+    fn swrl_rule_basic() {
+        // Test from Horned-OWL that I am struggling to roundtrip, so test the RDF serialization
+        xml_roundtrip(r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <owl:Ontology rdf:about="http://www.example.com/iri">
+        <owl:versionIRI rdf:resource="http://www.example.com/viri"/>
+    </owl:Ontology>
+    <owl:Class rdf:about="http://www.example.com/iri#A"/>
+    <owl:Class rdf:about="http://www.example.com/iri#B"/>
+    <swrl:Variable rdf:about="http://www.example.com/iri#x"/>
+    <swrl:Imp>
+        <swrl:body>
+            <swrl:AtomList>
+                <rdf:first>
+                    <swrl:ClassAtom>
+                        <swrl:classPredicate rdf:resource="http://www.example.com/iri#A"/>
+                        <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+                    </swrl:ClassAtom>
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:body>
+        <swrl:head>
+            <swrl:AtomList>
+                <rdf:first>
+                    <swrl:ClassAtom>
+                        <swrl:classPredicate rdf:resource="http://www.example.com/iri#B"/>
+                        <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+                    </swrl:ClassAtom>
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:head>
+    </swrl:Imp>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2002/07/owl#" => "owl",
+                    "http://www.w3.org/2003/11/swrl#" => "swrl"
+                ]
+            )
+        ).unwrap()
+    }
+
+    #[test]
+    fn swrl_rule_basic_minimal() {
+        // Cut down test from swrl_rule_basic test to isolate the problem
+        xml_roundtrip(r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <swrl:Imp>
+        <swrl:body>
+            <swrl:AtomList>
+                <rdf:first>
+                    <swrl:ClassAtom/>
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:body>
+    </swrl:Imp>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2003/11/swrl#" => "swrl"
+                ]
+            )
+        ).unwrap()
+    }
+
+    #[test]
+    fn temp() {
+        xml_roundtrip(
+            r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <owl:Ontology rdf:about="http://www.example.com/iri">
+        <owl:versionIRI rdf:resource="http://www.example.com/viri"/>
+    </owl:Ontology>
+    <owl:Class rdf:about="http://www.example.com/iri#A"/>
+    <owl:Class rdf:about="http://www.example.com/iri#B"/>
+    <swrl:Variable rdf:about="http://www.example.com/iri#x"/>
+    <swrl:Imp>
+        <swrl:head>
+            <swrl:AtomList>
+                <rdf:first>
+                    <swrl:ClassAtom>
+                        <swrl:classPredicate rdf:resource="http://www.example.com/iri#B"/>
+                        <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+                    </swrl:ClassAtom>
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:head>
+    </swrl:Imp>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2002/07/owl#" => "owl",
+                    "http://www.w3.org/2003/11/swrl#" => "swrl"
+                ]
+            )
+        ).unwrap()
+    }
+
+    /// This test checks whether bnodes which can elided actually
+    /// are. In this case, the complex ClassAtom bnode should be
+    /// pulled into the AtomList
+    #[test]
+    fn list_with_bnode_pull_in_backwards() {
+        xml_from_to(
+            r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <swrl:Imp>
+        <swrl:head>
+            <swrl:AtomList>
+                <rdf:first rdf:nodeID="bn1">
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:head>
+    </swrl:Imp>
+    <swrl:ClassAtom rdf:nodeID="bn1">
+         <swrl:classPredicate rdf:resource="http://www.example.com/iri#B"/>
+          <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+    </swrl:ClassAtom>
+</rdf:RDF>"###,
+            r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <swrl:Imp>
+        <swrl:head>
+            <swrl:AtomList>
+                <rdf:first>
+                    <swrl:ClassAtom>
+                        <swrl:classPredicate rdf:resource="http://www.example.com/iri#B"/>
+                        <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+                    </swrl:ClassAtom>
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:head>
+    </swrl:Imp>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2002/07/owl#" => "owl",
+                    "http://www.w3.org/2003/11/swrl#" => "swrl"
+                ]
+            )
+        ).unwrap()
+    }
 }
