@@ -2012,4 +2012,53 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
             )
         ).unwrap()
     }
+
+    /// Similar to the last test, we check to see whether the bnode is
+    /// elided. However, in this case, we change the order around so
+    /// that the bnode triples appear before the list.
+    #[test]
+    #[ignore]
+    fn list_with_bnode_pull_in_forward() {
+        xml_from_to(
+            r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <swrl:ClassAtom rdf:nodeID="bn1">
+         <swrl:classPredicate rdf:resource="http://www.example.com/iri#B"/>
+          <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+    </swrl:ClassAtom>
+    <swrl:Imp>
+        <swrl:head>
+            <swrl:AtomList>
+                <rdf:first rdf:nodeID="bn1">
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:head>
+    </swrl:Imp>
+</rdf:RDF>"###,
+            r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <swrl:Imp>
+        <swrl:head>
+            <swrl:AtomList>
+                <rdf:first>
+                    <swrl:ClassAtom>
+                        <swrl:classPredicate rdf:resource="http://www.example.com/iri#B"/>
+                        <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+                    </swrl:ClassAtom>
+                </rdf:first>
+                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+            </swrl:AtomList>
+        </swrl:head>
+    </swrl:Imp>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2002/07/owl#" => "owl",
+                    "http://www.w3.org/2003/11/swrl#" => "swrl"
+                ]
+            )
+        ).unwrap()
+    }
 }
