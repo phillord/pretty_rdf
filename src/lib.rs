@@ -879,7 +879,7 @@ where
             match t {
                 PTriple{object: PTerm::BlankNode(bn),..} => {
                     self.bnode_object_count.entry(bn.clone())
-                        .and_modify(|e| *e -= 1);
+                        .and_modify(|e| *e += 1);
                 },
                 _ => {}
             }
