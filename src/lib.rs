@@ -1400,6 +1400,16 @@ where
         loop {
             let optet = chunk.pop_front();
             if let Some(et) = optet {
+                // If this is a blank node
+                if let PSubject::BlankNode(bn) = et.subject() {
+                    // And there is later triple which will reference this as an object
+                    if chunk.object_count(bn) > 0 {
+                        // Don't render it here, but later
+                        chunk.push_back(et);
+                        continue;
+                    }
+                }
+
                 self.format_expanded(&et, &mut chunk)?;
             } else {
                 break;
@@ -2054,7 +2064,6 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
     /// elided. However, in this case, we change the order around so
     /// that the bnode triples appear before the list.
     #[test]
-    #[ignore]
     fn list_with_bnode_pull_in_forward() {
         xml_from_to(
             r###"<?xml version="1.0" encoding="UTF-8"?>
