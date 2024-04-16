@@ -13,7 +13,7 @@ use std::{
 };
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     fmt::{Debug, Formatter},
 };
 
@@ -706,19 +706,9 @@ where
 pub struct PChunk<A: AsRef<str>> {
     // Ordered list of triples
     v: VecDeque<PExpandedTriple<A>>,
-    // While we render by working through the ordered list, we
-    // sometimes will render later triples sooner, if we have common
-    // subjects for instance. We do this by adding here rather than
-    // extracting from the VecDeque, presumably because it is faster.
-    // TODO: Checking whether this makes any difference at some point
-    // would be sensible, because it makes the code more complex. Or
-    // replacing the HashSet with a
-    // IndexMap<(PBlankNode,ExpandedTripleDiscriminant),
-    // PExpandedTriple)>. by_sub could then disappear and become two lookups
-    r: HashSet<PExpandedTriple<A>>,
     // Fast lookup by subject
     // Nodes with the same bnode should be on either or both of a single PMultitriple, or PTripleSeq
-    by_sub: HashMap<PBlankNode<A>, (Option<PMultiTriple<A>>, Option<PTripleSeq<A>>)>,
+    by_sub: HashMap<PSubject<A>,(Option<PMultiTriple<A>>, Option<PTripleSeq<A>>)>,
     // bnode object count -- we need to know how many times a bnode appears as an object
     // because if it occurs more than once we cannot elide it
     bnode_object_count: HashMap<PBlankNode<A>,usize>,
@@ -792,32 +782,59 @@ where
             .chain(seq.into_iter().map(|s| PExpandedTriple::PTripleSeq(s)))
             .collect();
 
-        PChunk {
+        let mut chk = PChunk {
             v: etv,
-            r: HashSet::new(),
             by_sub: HashMap::new(),
             bnode_object_count
+        };
+        chk.subject_reindex();
+
+        chk
+    }
+
+    fn subject_insert(&mut self, et:&PExpandedTriple<A>) {
+        let e = self.by_sub.entry(et.subject().clone()).or_insert((None, None));
+        match et {
+            PExpandedTriple::PMultiTriple(mt) => {
+                (*e).0 = Some(mt.clone())
+            }
+            PExpandedTriple::PTripleSeq(seq) => {
+                (*e).1 = Some(seq.clone())
+            }
         }
     }
 
-    pub fn from_raw(vec: Vec<PExpandedTriple<A>>) -> Self {
-        PChunk {
-            v: vec.into(),
-            r: HashSet::new(),
-            by_sub: HashMap::new(),
-            bnode_object_count: HashMap::new(),
+    fn subject_remove(&mut self, et:&PExpandedTriple<A>) {
+        let e = self.by_sub.entry(et.subject().clone()).or_insert((None, None));
+        match et {
+            PExpandedTriple::PMultiTriple(_) => {
+                (*e).0 = None
+            }
+            PExpandedTriple::PTripleSeq(_) => {
+                (*e).1 = None
+            }
         }
+    }
+
+    fn subject_reindex(&mut self) {
+        self.by_sub.clear();
+        // avoid partial move issues
+        let mut v = std::mem::take(&mut self.v);
+        for i in v.iter() {
+            self.subject_insert(i);
+        }
+        std::mem::swap(&mut self.v, &mut v)
     }
 
     pub fn empty() -> Self {
         PChunk {
             v: vec![].into(),
-            r: HashSet::new(),
             by_sub: HashMap::new(),
             bnode_object_count: HashMap::new(),
         }
     }
 
+    // I don't think we ever need this function
     pub fn sort(&mut self) {
         let _ = &self.v.make_contiguous().sort_by(|a, b| match (a, b) {
             (PExpandedTriple::PMultiTriple(_), PExpandedTriple::PTripleSeq(_)) => Ordering::Less,
@@ -831,63 +848,32 @@ where
             }
             _ => Ordering::Equal
         });
+
+        self.subject_reindex();
     }
 
-    pub fn insert(&mut self, et: PExpandedTriple<A>) {
+    pub fn push_back(&mut self, et: PExpandedTriple<A>) {
+        self.subject_insert(&et);
         self.v.push_back(et);
-        self.by_sub.clear();
     }
 
-    pub fn next(&mut self) -> Option<PExpandedTriple<A>> {
-        loop {
-            if let Some(front) = self.v.pop_front() {
-                if !self.r.contains(&front) {
-                    return Some(front);
-                }
-            } else {
-                return None;
-            }
+    pub fn pop_front(&mut self) -> Option<PExpandedTriple<A>> {
+        let et = self.v.pop_front();
+        if let Some(ref et) = et {
+            self.subject_remove(et);
         }
+        et
     }
 
-    fn remove_et(&mut self, et: &PExpandedTriple<A>) {
-        self.r.insert(et.clone());
+    fn remove(&mut self, et: &PExpandedTriple<A>) {
+        if let Some(pos) = self.v.iter().position(|n| n == et) {
+            self.v.remove(pos);
+        }
+        self.subject_remove(et);
     }
 
     fn find_subject(&mut self, bn: &PBlankNode<A>) -> (Option<PMultiTriple<A>>, Option<PTripleSeq<A>>) {
-        if self.by_sub.is_empty() {
-            for v in self.v.iter() {
-                if let PSubject::BlankNode(n) = v.subject() {
-                    let e =
-                        self.by_sub.entry(n.clone())
-                            .or_insert((None, None));
-                    match v {
-                        PExpandedTriple::PMultiTriple(mt) => {
-                            (*e).0 = Some(mt.clone())
-                        },
-                        PExpandedTriple::PTripleSeq(ts) => {
-                            (*e).1 = Some(ts.clone())
-                        }
-                    };
-                }
-            }
-        }
-
-        if let Some(mut sub) = self.by_sub.get(bn).cloned() {
-            if let Some(ref mt) = sub.0 {
-                if self.r.contains(&mt.clone().into()) {
-                    sub.0 = None
-                }
-            }
-            if let Some(ref ts) = sub.1 {
-                if self.r.contains(&ts.clone().into()) {
-                    sub.1 = None
-                }
-            }
-            return sub;
-        }
-
-        (None, None)
+        self.by_sub.get(&bn.clone().into()).cloned().unwrap_or((None, None))
     }
 
     fn object_count(&self, bn:&PBlankNode<A>) -> usize {
@@ -1169,8 +1155,8 @@ where
                             self.write_start(Event::Start(property_open))
                                 .map_err(map_err)?;
 
-                            chunk.remove_et(&seq.clone().into());
-                            chunk.remove_et(&mt.clone().into());
+                            chunk.remove(&seq.clone().into());
+                            chunk.remove(&mt.clone().into());
 
                             // As we have both types of edge, we need
                             // not to render the seq as a seq but as a
@@ -1255,7 +1241,7 @@ where
             let subj = seq.subject().clone();
             let v: Vec<PMultiTriple<A>> = seq.clone().into();
             for i in v {
-                chunk.insert(i.into())
+                chunk.push_back(i.into())
             }
             if let PSubject::BlankNode(n) = subj {
                   return match chunk.find_subject(&n) {
@@ -1332,7 +1318,7 @@ where
         expanded: &PExpandedTriple<A>,
         chunk: &mut PChunk<A>,
     ) -> Result<(), io::Error> {
-        chunk.remove_et(expanded);
+        chunk.remove(expanded);
 
         match expanded {
             PExpandedTriple::PMultiTriple(ref mt) => {
@@ -1347,15 +1333,15 @@ where
     }
 
     pub fn chunk_seq(&mut self, seq: PTripleSeq<A>) {
-        self.chunk.insert(seq.into())
+        self.chunk.push_back(seq.into())
     }
 
     pub fn chunk_triple(&mut self, triple: PTriple<A>) {
-        self.chunk.insert(triple.into());
+        self.chunk.push_back(triple.into());
     }
 
     pub fn chunk_multi(&mut self, multi: PMultiTriple<A>) {
-        self.chunk.insert(multi.into())
+        self.chunk.push_back(multi.into())
     }
 
     pub fn sort_chunk(&mut self) {
@@ -1370,7 +1356,7 @@ where
 
     pub fn format_chunk(&mut self, mut chunk: PChunk<A>) -> Result<(), io::Error> {
         loop {
-            let optet = chunk.next();
+            let optet = chunk.pop_front();
             if let Some(et) = optet {
                 self.format_expanded(&et, &mut chunk)?;
             } else {
@@ -1485,7 +1471,7 @@ mod test {
 
     use super::{
         ChunkedRdfXmlFormatter, ChunkedRdfXmlFormatterConfig, PBlankNode, PChunk, PNamedNode,
-        PTriple, PTripleSeq,
+        PTriple, PExpandedTriple,
     };
 
     fn tnn() -> PTriple<String> {
@@ -1569,41 +1555,49 @@ mod test {
     #[test]
     pub fn multi_chunk_sort_stable() {
         let mut chk: PChunk<String> = PChunk::empty();
-        chk.insert(tnn().into());
-        chk.insert(tnn1().into());
+        chk.push_back(tnn().into());
+        chk.push_back(tnn1().into());
         chk.sort();
 
-        assert_eq!(chk.next(), Some(tnn().into()));
-        assert_eq!(chk.next(), Some(tnn1().into()));
+        assert_eq!(chk.pop_front(), Some(tnn().into()));
+        assert_eq!(chk.pop_front(), Some(tnn1().into()));
 
         let mut chk: PChunk<String> = PChunk::empty();
-        chk.insert(tnn1().into());
-        chk.insert(tnn().into());
+        chk.push_back(tnn1().into());
+        chk.push_back(tnn().into());
         chk.sort();
 
-        assert_eq!(chk.next(), Some(tnn1().into()));
-        assert_eq!(chk.next(), Some(tnn().into()));
+        assert_eq!(chk.pop_front(), Some(tnn1().into()));
+        assert_eq!(chk.pop_front(), Some(tnn().into()));
     }
 
     #[test]
     pub fn multi_chunk_sort() {
+        // Get an seq that we made earlier
+        let mut s = some_seq();
+        s.pop_front();
+        let s = s.pop_front().unwrap();
+
         let mut chk: PChunk<String> = PChunk::empty();
 
-        chk.insert(PTripleSeq::empty().into());
-        chk.insert(bnn().into());
-        chk.insert(tnn().into());
+        chk.push_back(s);
+        chk.push_back(bnn().into());
+        chk.push_back(tnn().into());
 
         chk.sort();
 
-        assert_eq!(chk.next(), Some(tnn().into()));
-        assert_eq!(chk.next(), Some(bnn().into()));
-        assert_eq!(chk.next(), Some(PTripleSeq::empty().into()));
+        assert_eq!(chk.pop_front(), Some(tnn().into()));
+        assert_eq!(chk.pop_front(), Some(bnn().into()));
+        assert!(matches!{
+            chk.pop_front(), Some(PExpandedTriple::PTripleSeq(_))
+        });
     }
 
     #[test]
     pub fn multi_chunk_find_subject_with_seq() {
         let mut chk = some_seq();
 
+        dbg!(&chk);
         let sub = chk.find_subject(&PBlankNode::new("seq0".to_string()));
 
         assert!(matches!{
