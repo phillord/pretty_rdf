@@ -875,44 +875,21 @@ where
 
     pub fn push_back(&mut self, et: PExpandedTriple<A>) {
         self.subject_insert(&et);
-        for t in et.triples() {
-            match t {
-                PTriple{object: PTerm::BlankNode(bn),..} => {
-                    self.bnode_object_count.entry(bn.clone())
-                        .and_modify(|e| *e += 1);
-                },
-                _ => {}
-            }
-        }
-
         self.v.push_back(et);
     }
 
     pub fn pop_front(&mut self) -> Option<PExpandedTriple<A>> {
         let et = self.v.pop_front();
         if let Some(ref et) = et {
-            self.remove_1(et);
+            self.subject_remove(et);
         }
         et
-    }
-
-    fn remove_1(&mut self, et: &PExpandedTriple<A>) {
-        self.subject_remove(et);
-        for t in et.triples() {
-            match t {
-                PTriple{object: PTerm::BlankNode(bn),..} => {
-                    self.bnode_object_count.entry(bn.clone())
-                        .and_modify(|e| *e -= 1);
-                },
-                _ => {}
-            }
-        }
     }
 
     fn remove(&mut self, et: &PExpandedTriple<A>) {
         if let Some(pos) = self.v.iter().position(|n| n == et) {
             self.v.remove(pos);
-            self.remove_1(et);
+            self.subject_remove(et)
         }
     }
 
@@ -1177,57 +1154,59 @@ where
                     .map_err(map_err)?;
             }
             PTerm::BlankNode(bn) => {
-                match chunk.find_subject(bn) {
-                    (None, Some(seq)) => {
-                        if !seq.has_literal() {
+                if chunk.object_count(bn) == 1 {
+                    match chunk.find_subject(bn) {
+                        (None, Some(seq)) => {
+                            if !seq.has_literal() {
                             property_open.push_attribute(("rdf:parseType", "Collection"));
-                        }
-                        self.write_start(Event::Start(property_open))
-                            .map_err(map_err)?;
+                            }
+                            self.write_start(Event::Start(property_open))
+                                .map_err(map_err)?;
 
-                        self.format_expanded(&seq.clone().into(), chunk)?;
+                            self.format_expanded(&seq.clone().into(), chunk)?;
                             return Ok(())
-                    }
-                    (Some(mt), None) => {
-                        self.write_start(Event::Start(property_open))
-                            .map_err(map_err)?;
-                        self.format_expanded(&mt.clone().into(), chunk)?;
-                        return Ok(())
-                    }
-                    (Some(mut mt), Some(seq)) => {
-                        self.write_start(Event::Start(property_open))
-                            .map_err(map_err)?;
-
-                        chunk.remove(&seq.clone().into());
-                        chunk.remove(&mt.clone().into());
-
-                        // As we have both types of edge, we need
-                        // not to render the seq as a seq but as a
-                        // set of triples.
-                        let mut v: Vec<PMultiTriple<A>> = seq.into();
-
-                        // The first triple of this will accept
-                        // the other triples of the multi triple
-                        // as they are guaranteed to have the same bnode
-                        for t in v[0].triples(){
-                            assert!(
-                                mt.accept(t.clone()).is_none(),
-                                "The subject of the sequence and other triples should be the same at this point"
-                            );
                         }
-                        v[0] = mt;
-
-
-                        for i in v {
-                            self.format_multi(&i, chunk)?;
+                        (Some(mt), None) => {
+                            self.write_start(Event::Start(property_open))
+                                .map_err(map_err)?;
+                            self.format_expanded(&mt.clone().into(), chunk)?;
+                            return Ok(())
                         }
+                        (Some(mut mt), Some(seq)) => {
+                            self.write_start(Event::Start(property_open))
+                                .map_err(map_err)?;
 
-                        return Ok(())
-                    }
-                    (None, None) => {
+                            chunk.remove(&seq.clone().into());
+                            chunk.remove(&mt.clone().into());
+
+                            // As we have both types of edge, we need
+                            // not to render the seq as a seq but as a
+                            // set of triples.
+                            let mut v: Vec<PMultiTriple<A>> = seq.into();
+
+                            // The first triple of this will accept
+                            // the other triples of the multi triple
+                            // as they are guaranteed to have the same bnode
+                            for t in v[0].triples(){
+                                assert!(
+                                    mt.accept(t.clone()).is_none(),
+                                    "The subject of the sequence and other triples should be the same at this point"
+                                );
+                            }
+                            v[0] = mt;
+
+
+                            for i in v {
+                                self.format_multi(&i, chunk)?;
+                            }
+
+                            return Ok(())
+                        }
+                        (None, None) => {
+                        }
                     }
                 }
-
+                property_open.push_attribute(("rdf:nodeID", bn.as_ref()));
                 self.write_start(Event::Start(property_open))
                     .map_err(map_err)?;
             }
@@ -1403,7 +1382,7 @@ where
                 // If this is a blank node
                 if let PSubject::BlankNode(bn) = et.subject() {
                     // And there is later triple which will reference this as an object
-                    if chunk.object_count(bn) > 0 {
+                    if chunk.object_count(bn) == 1 {
                         // Don't render it here, but later
                         chunk.push_back(et);
                         continue;
@@ -1649,7 +1628,6 @@ mod test {
     pub fn multi_chunk_find_subject_with_seq() {
         let mut chk = some_seq();
 
-        dbg!(&chk);
         let sub = chk.find_subject(&PBlankNode::new("seq0".to_string()));
 
         assert!(matches!{
@@ -1698,7 +1676,6 @@ mod test {
 
         let mut f = ChunkedRdfXmlFormatter::new(sink, config)?;
         let chk = PChunk::normalize(source);
-        dbg!(&chk);
         f.format_chunk(chk)?;
 
         let w = f.finish()?;
@@ -1831,51 +1808,6 @@ _:genid3 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/19
     </rdf:Description>
 </rdf:RDF>"###,
             spec_prefix(),
-        )
-    }
-
-    #[test]
-    fn owl_breakage() {
-        nt_xml_roundtrip_prefix(
-            r###"<http://www.example.com/iri> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Ontology> .
-<http://www.example.com/iri> <http://www.w3.org/2002/07/owl#versionIRI> <http://www.example.com/viri> .
-<http://www.example.com/iri#r> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#ObjectProperty> .
-<http://www.example.com/iri#A> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .
-<http://www.example.com/iri#B> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .
-<http://www.example.com/iri#B> <http://www.w3.org/2000/01/rdf-schema#subClassOf> _:genid1 .
-_:genid1 <http://www.w3.org/2002/07/owl#someValuesFrom> <http://www.example.com/iri#A> .
-_:genid1 <http://www.w3.org/2002/07/owl#onProperty> <http://www.example.com/iri#r> .
-_:genid1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Restriction> .
-_:genid2 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Axiom> .
-_:genid2 <http://www.w3.org/2002/07/owl#annotatedSource> <http://www.example.com/iri#B> .
-_:genid2 <http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2000/01/rdf-schema#subClassOf> .
-_:genid2 <http://www.w3.org/2002/07/owl#annotatedTarget> _:genid1 .
-_:genid2 <http://www.w3.org/2000/01/rdf-schema#comment> "Annotation on subclass axiom"@en ."###,
-
-            r###"<?xml version="1.0" encoding="UTF-8"?>
-<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
-    <Ontology xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri">
-        <versionIRI xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/viri"/>
-    </Ontology>
-    <ObjectProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#r"/>
-    <Class xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#A"/>
-    <Class xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#B">
-        <subClassOf xmlns="http://www.w3.org/2000/01/rdf-schema#">
-            <Restriction xmlns="http://www.w3.org/2002/07/owl#">
-                <someValuesFrom xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#A"/>
-                <onProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#r"/>
-            </Restriction>
-        </subClassOf>
-    </Class>
-    <Axiom xmlns="http://www.w3.org/2002/07/owl#">
-        <annotatedSource xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#B"/>
-        <annotatedProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.w3.org/2000/01/rdf-schema#subClassOf"/>
-        <annotatedTarget xmlns="http://www.w3.org/2002/07/owl#"/>
-        <comment xmlns="http://www.w3.org/2000/01/rdf-schema#" xml:lang="en">Annotation on subclass axiom</comment>
-    </Axiom>
-</rdf:RDF>"###,
-
-            spec_prefix()
         )
     }
 
@@ -2101,6 +2033,36 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
             Some(
                 indexmap![
                     "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2002/07/owl#" => "owl",
+                    "http://www.w3.org/2003/11/swrl#" => "swrl"
+                ]
+            )
+        ).unwrap()
+    }
+
+    #[test]
+    fn non_elidable_bnode() {
+        xml_roundtrip(
+    r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <owl:Class rdf:about="http://www.example.com/iri#B">
+        <rdfs:subClassOf rdf:nodeID="genid1"/>
+    </owl:Class>
+    <owl:Restriction rdf:nodeID="genid1">
+        <owl:onProperty rdf:resource="http://www.example.com/iri#r"/>
+        <owl:someValuesFrom rdf:resource="http://www.example.com/iri#A"/>
+    </owl:Restriction>
+    <owl:Axiom>
+        <owl:annotatedSource rdf:resource="http://www.example.com/iri#B"/>
+        <owl:annotatedProperty rdf:resource="http://www.w3.org/2000/01/rdf-schema#subClassOf"/>
+        <owl:annotatedTarget rdf:nodeID="genid1"/>
+        <rdfs:comment xml:lang="en">Annotation on subclass axiom</rdfs:comment>
+    </owl:Axiom>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2000/01/rdf-schema#" => "rdfs",
                     "http://www.w3.org/2002/07/owl#" => "owl",
                     "http://www.w3.org/2003/11/swrl#" => "swrl"
                 ]
