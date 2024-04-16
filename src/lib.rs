@@ -457,6 +457,9 @@ where
 
     /// Return all types
     fn find_typed(&self) -> Option<&PTriple<A>>;
+
+    /// Return all triples
+    fn triples(&self) -> Vec<&PTriple<A>>;
 }
 
 /// A multi-triple contains multiple triples with the same shared subject
@@ -477,10 +480,6 @@ where
 
     pub fn new(vec: Vec<PTriple<A>>) -> PMultiTriple<A> {
         PMultiTriple { vec }
-    }
-
-    pub fn triples(&self) -> impl Iterator<Item=&PTriple<A>>{
-        self.vec.iter()
     }
 }
 
@@ -511,6 +510,10 @@ where
 
     fn find_typed(&self) -> Option<&PTriple<A>> {
         self.vec.iter().find(|et| et.is_type())
+    }
+
+    fn triples(&self) -> Vec<&PTriple<A>> {
+        self.vec.iter().collect()
     }
 }
 
@@ -614,7 +617,18 @@ where
     fn find_typed(&self) -> Option<&PTriple<A>> {
         None
     }
-}
+
+    fn triples(&self) -> Vec<&PTriple<A>> {
+        self.list_seq.iter().flat_map(|(_, ot, t)|
+            if let Some(first_t) = ot {
+                vec![first_t, t]
+            }
+            else {
+                vec![t]
+            }
+        ).collect()
+    }
+ }
 
 /// Any form of triple container
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -689,6 +703,13 @@ where
         match self {
             Self::PMultiTriple(mt) => mt.find_typed(),
             Self::PTripleSeq(seq) => seq.find_typed(),
+        }
+    }
+
+    fn triples(&self) -> Vec<&PTriple<A>> {
+        match self {
+            Self::PMultiTriple(mt) => mt.triples(),
+            Self::PTripleSeq(seq) => seq.triples(),
         }
     }
 }
@@ -854,22 +875,45 @@ where
 
     pub fn push_back(&mut self, et: PExpandedTriple<A>) {
         self.subject_insert(&et);
+        for t in et.triples() {
+            match t {
+                PTriple{object: PTerm::BlankNode(bn),..} => {
+                    self.bnode_object_count.entry(bn.clone())
+                        .and_modify(|e| *e -= 1);
+                },
+                _ => {}
+            }
+        }
+
         self.v.push_back(et);
     }
 
     pub fn pop_front(&mut self) -> Option<PExpandedTriple<A>> {
         let et = self.v.pop_front();
         if let Some(ref et) = et {
-            self.subject_remove(et);
+            self.remove_1(et);
         }
         et
+    }
+
+    fn remove_1(&mut self, et: &PExpandedTriple<A>) {
+        self.subject_remove(et);
+        for t in et.triples() {
+            match t {
+                PTriple{object: PTerm::BlankNode(bn),..} => {
+                    self.bnode_object_count.entry(bn.clone())
+                        .and_modify(|e| *e -= 1);
+                },
+                _ => {}
+            }
+        }
     }
 
     fn remove(&mut self, et: &PExpandedTriple<A>) {
         if let Some(pos) = self.v.iter().position(|n| n == et) {
             self.v.remove(pos);
+            self.remove_1(et);
         }
-        self.subject_remove(et);
     }
 
     fn find_subject(&mut self, bn: &PBlankNode<A>) -> (Option<PMultiTriple<A>>, Option<PTripleSeq<A>>) {
@@ -1133,59 +1177,57 @@ where
                     .map_err(map_err)?;
             }
             PTerm::BlankNode(bn) => {
-                if chunk.object_count(bn) == 1 {
-                    match chunk.find_subject(bn) {
-                        (None, Some(seq)) => {
-                            if !seq.has_literal() {
-                                property_open.push_attribute(("rdf:parseType", "Collection"));
-                            }
-                            self.write_start(Event::Start(property_open))
-                                .map_err(map_err)?;
+                match chunk.find_subject(bn) {
+                    (None, Some(seq)) => {
+                        if !seq.has_literal() {
+                            property_open.push_attribute(("rdf:parseType", "Collection"));
+                        }
+                        self.write_start(Event::Start(property_open))
+                            .map_err(map_err)?;
 
-                            self.format_expanded(&seq.clone().into(), chunk)?;
+                        self.format_expanded(&seq.clone().into(), chunk)?;
                             return Ok(())
+                    }
+                    (Some(mt), None) => {
+                        self.write_start(Event::Start(property_open))
+                            .map_err(map_err)?;
+                        self.format_expanded(&mt.clone().into(), chunk)?;
+                        return Ok(())
+                    }
+                    (Some(mut mt), Some(seq)) => {
+                        self.write_start(Event::Start(property_open))
+                            .map_err(map_err)?;
+
+                        chunk.remove(&seq.clone().into());
+                        chunk.remove(&mt.clone().into());
+
+                        // As we have both types of edge, we need
+                        // not to render the seq as a seq but as a
+                        // set of triples.
+                        let mut v: Vec<PMultiTriple<A>> = seq.into();
+
+                        // The first triple of this will accept
+                        // the other triples of the multi triple
+                        // as they are guaranteed to have the same bnode
+                        for t in v[0].triples(){
+                            assert!(
+                                mt.accept(t.clone()).is_none(),
+                                "The subject of the sequence and other triples should be the same at this point"
+                            );
                         }
-                        (Some(mt), None) => {
-                            self.write_start(Event::Start(property_open))
-                                .map_err(map_err)?;
-                            self.format_expanded(&mt.clone().into(), chunk)?;
-                            return Ok(())
+                        v[0] = mt;
+
+
+                        for i in v {
+                            self.format_multi(&i, chunk)?;
                         }
-                        (Some(mut mt), Some(seq)) => {
-                            self.write_start(Event::Start(property_open))
-                                .map_err(map_err)?;
 
-                            chunk.remove(&seq.clone().into());
-                            chunk.remove(&mt.clone().into());
-
-                            // As we have both types of edge, we need
-                            // not to render the seq as a seq but as a
-                            // set of triples.
-                            let mut v: Vec<PMultiTriple<A>> = seq.into();
-
-                            // The first triple of this will accept
-                            // the other triples of the multi triple
-                            // as they are guaranteed to have the same bnode
-                            for t in v[0].triples(){
-                                assert!(
-                                    mt.accept(t.clone()).is_none(),
-                                    "The subject of the sequence and other triples should be the same at this point"
-                                );
-                            }
-                            v[0] = mt;
-
-
-                            for i in v {
-                                self.format_multi(&i, chunk)?;
-                            }
-
-                            return Ok(())
-                        }
-                        (None, None) => {
-                        }
+                        return Ok(())
+                    }
+                    (None, None) => {
                     }
                 }
-                property_open.push_attribute(("rdf:nodeID", bn.id.as_ref()));
+
                 self.write_start(Event::Start(property_open))
                     .map_err(map_err)?;
             }
@@ -1646,12 +1688,12 @@ mod test {
 
         let mut f = ChunkedRdfXmlFormatter::new(sink, config)?;
         let chk = PChunk::normalize(source);
-        //dbg!(&chk);
+        dbg!(&chk);
         f.format_chunk(chk)?;
 
         let w = f.finish()?;
         let s = String::from_utf8(w)?;
-        println!("{}", s);
+        println!("XML Out {}", s);
         Ok(s)
     }
 
@@ -1808,16 +1850,17 @@ _:genid2 <http://www.w3.org/2000/01/rdf-schema#comment> "Annotation on subclass 
     <ObjectProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#r"/>
     <Class xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#A"/>
     <Class xmlns="http://www.w3.org/2002/07/owl#" rdf:about="http://www.example.com/iri#B">
-        <subClassOf xmlns="http://www.w3.org/2000/01/rdf-schema#" rdf:nodeID="genid1"/>
+        <subClassOf xmlns="http://www.w3.org/2000/01/rdf-schema#">
+            <Restriction xmlns="http://www.w3.org/2002/07/owl#">
+                <someValuesFrom xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#A"/>
+                <onProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#r"/>
+            </Restriction>
+        </subClassOf>
     </Class>
-    <Restriction xmlns="http://www.w3.org/2002/07/owl#" rdf:nodeID="genid1">
-        <someValuesFrom xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#A"/>
-        <onProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#r"/>
-    </Restriction>
     <Axiom xmlns="http://www.w3.org/2002/07/owl#">
         <annotatedSource xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.example.com/iri#B"/>
         <annotatedProperty xmlns="http://www.w3.org/2002/07/owl#" rdf:resource="http://www.w3.org/2000/01/rdf-schema#subClassOf"/>
-        <annotatedTarget xmlns="http://www.w3.org/2002/07/owl#" rdf:nodeID="genid1"/>
+        <annotatedTarget xmlns="http://www.w3.org/2002/07/owl#"/>
         <comment xmlns="http://www.w3.org/2000/01/rdf-schema#" xml:lang="en">Annotation on subclass axiom</comment>
     </Axiom>
 </rdf:RDF>"###,
