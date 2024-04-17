@@ -813,8 +813,10 @@ where
         chk
     }
 
-    fn subject_insert(&mut self, et:&PExpandedTriple<A>) {
-        let e = self.by_sub.entry(et.subject().clone()).or_insert((None, None));
+    // Associated function rather than method to work around partial move issues
+    fn subject_insert(by_sub: &mut HashMap<PSubject<A>,(Option<PMultiTriple<A>>, Option<PTripleSeq<A>>)>,
+        et:&PExpandedTriple<A>) {
+        let e = by_sub.entry(et.subject().clone()).or_insert((None, None));
         match et {
             PExpandedTriple::PMultiTriple(mt) => {
                 (*e).0 = Some(mt.clone())
@@ -839,12 +841,9 @@ where
 
     fn subject_reindex(&mut self) {
         self.by_sub.clear();
-        // avoid partial move issues
-        let mut v = std::mem::take(&mut self.v);
-        for i in v.iter() {
-            self.subject_insert(i);
+        for i in self.v.iter() {
+            Self::subject_insert(&mut self.by_sub, i);
         }
-        std::mem::swap(&mut self.v, &mut v)
     }
 
     pub fn empty() -> Self {
@@ -873,8 +872,23 @@ where
         self.subject_reindex();
     }
 
+    pub fn accept_or_push_back(&mut self, t: PTriple<A>){
+        let mut t = t;
+        for i in self.v.iter_mut() {
+            if let Some(t1) = i.accept(t) {
+                t = t1;
+            }
+            else {
+                // We need to update the subject index, because it has a clone of i
+                Self::subject_insert(&mut self.by_sub, &i.clone());
+                return
+            }
+        }
+        self.push_back(t.into());
+    }
+
     pub fn push_back(&mut self, et: PExpandedTriple<A>) {
-        self.subject_insert(&et);
+        Self::subject_insert(&mut self.by_sub, &et);
         self.v.push_back(et);
     }
 
@@ -1157,49 +1171,42 @@ where
                 if chunk.object_count(bn) == 1 {
                     match chunk.find_subject(bn) {
                         (None, Some(seq)) => {
+                            // The logic here also appears in the
+                            // format_seq -- perhaps we should be able
+                            // to pass the open tag into seq.
                             if !seq.has_literal() {
-                            property_open.push_attribute(("rdf:parseType", "Collection"));
+                                property_open.push_attribute(("rdf:parseType", "Collection"));
                             }
                             self.write_start(Event::Start(property_open))
                                 .map_err(map_err)?;
 
-                            self.format_expanded(&seq.clone().into(), chunk)?;
+                            chunk.remove(&seq.clone().into());
+                            if seq.has_literal() {
+                                self.format_seq_longhand(&seq, chunk)?;
+                            }
+                            else {
+                                self.format_seq_shorthand(&seq, chunk)?;
+                            }
                             return Ok(())
                         }
                         (Some(mt), None) => {
                             self.write_start(Event::Start(property_open))
                                 .map_err(map_err)?;
-                            self.format_expanded(&mt.clone().into(), chunk)?;
+
+                            chunk.remove(&mt.clone().into());
+                            self.format_multi(&mt, chunk)?;
                             return Ok(())
                         }
-                        (Some(mut mt), Some(seq)) => {
+                        (Some(_mt), Some(seq)) => {
                             self.write_start(Event::Start(property_open))
                                 .map_err(map_err)?;
 
+                            // We should not need to format the mt
+                            // because it will be formatted in the
+                            // next step when we format the sequence
+                            // long hand.
                             chunk.remove(&seq.clone().into());
-                            chunk.remove(&mt.clone().into());
-
-                            // As we have both types of edge, we need
-                            // not to render the seq as a seq but as a
-                            // set of triples.
-                            let mut v: Vec<PMultiTriple<A>> = seq.into();
-
-                            // The first triple of this will accept
-                            // the other triples of the multi triple
-                            // as they are guaranteed to have the same bnode
-                            for t in v[0].triples(){
-                                assert!(
-                                    mt.accept(t.clone()).is_none(),
-                                    "The subject of the sequence and other triples should be the same at this point"
-                                );
-                            }
-                            v[0] = mt;
-
-
-                            for i in v {
-                                self.format_multi(&i, chunk)?;
-                            }
-
+                            self.format_seq_longhand(&seq, chunk)?;
                             return Ok(())
                         }
                         (None, None) => {
@@ -1255,34 +1262,41 @@ where
         Ok(())
     }
 
-    fn format_seq(&mut self, seq: &PTripleSeq<A>, chunk: &mut PChunk<A>) -> Result<(), io::Error> {
+
+    fn format_seq_longhand(&mut self, seq: &PTripleSeq<A>, chunk: &mut PChunk<A>) -> Result<(), io::Error> {
         // We can't format seqs with literals in like this -- we need
         // to do long hand
-        if seq.has_literal() {
-            let subj = seq.subject().clone();
-            let v: Vec<PMultiTriple<A>> = seq.clone().into();
-            for i in v {
-                chunk.push_back(i.into())
-            }
-            if let PSubject::BlankNode(n) = subj {
-                  return match chunk.find_subject(&n) {
-                            (Some(mt), None) => {
-                                self.format_expanded(&mt.clone().into(), chunk)
-                            }
-                            (None, Some(seq)) => {
-                                self.format_expanded(&seq.clone().into(), chunk)
-                            }
-                            (Some(mt), Some(seq)) => {
-                                self.format_expanded(&mt.clone().into(), chunk)?;
-                                self.format_expanded(&seq.clone().into(), chunk)
-                            }
-                            _ => {
-                                todo!("We shouldn't get here");
-                            }
-                  }
-            }
+        //if seq.has_literal() {
+        let subj = seq.subject().clone();
+        // Turn it into a set of triples
+        let v: Vec<&PTriple<A>> = seq.triples();
+        for i in v {
+            chunk.accept_or_push_back(i.clone())
         }
 
+        if let PSubject::BlankNode(n) = subj {
+            return match chunk.find_subject(&n) {
+                (Some(mt), None) => {
+                    self.format_expanded(&mt.clone().into(), chunk)
+                }
+                (None, Some(_seq)) => {
+                    // This should not happen because we have amalgameted the seq into a MT
+                    todo!("We shouldn't get here");
+                }
+                (Some(_mt), Some(_seq)) => {
+                    todo!("We shouldn't get here");
+                }
+                _ => {
+                    todo!("We shouldn't get here");
+                }
+            }
+        }
+        else{
+            todo!("We shouldn't get here")
+        }
+    }
+
+    fn format_seq_shorthand(&mut self, seq: &PTripleSeq<A>, chunk: &mut PChunk<A>) -> Result<(), io::Error> {
         for tup in seq.list_seq.iter() {
             if let Some(ref triple) = tup.1 {
                 match &triple.object {
@@ -1310,7 +1324,10 @@ where
                         self.format_object(property_open, &triple.object, chunk, true)?;
                         self.write_close()?;
                     }
-                    _ => todo!(),
+                    any => {
+                        dbg!(any);
+                        todo!()
+                    }
                 }
             }
         }
@@ -1340,13 +1357,12 @@ where
         chunk: &mut PChunk<A>,
     ) -> Result<(), io::Error> {
         chunk.remove(expanded);
-
         match expanded {
             PExpandedTriple::PMultiTriple(ref mt) => {
                 self.format_multi(mt, chunk)?;
             }
             PExpandedTriple::PTripleSeq(ref seq) => {
-                self.format_seq(seq, chunk)?;
+                self.format_seq_longhand(seq, chunk)?;
             }
         }
 
@@ -1825,6 +1841,175 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
         ).unwrap();
     }
 
+    // Seq Handling
+    #[test]
+    fn seq_simple() {
+        xml_roundtrip(
+        r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+    <rdf:Description rdf:about="http://example.org/basket">
+        <ex:hasFruit rdf:parseType="Collection">
+            <rdf:Description rdf:about="http://example.org/banana"/>
+            <rdf:Description rdf:about="http://example.org/apple"/>
+            <rdf:Description rdf:about="http://example.org/pear"/>
+        </ex:hasFruit>
+    </rdf:Description>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://purl.org/dc/elements/1.1/" => "dc",
+                    "http://example.org/stuff/1.0/" => "ex"
+                ]
+            )
+        ).unwrap();
+    }
+
+    #[test]
+    fn seq_longhand() {
+            xml_from_to(
+                r###"<?xml version="1.0"?>
+<rdf:RDF  xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+   <rdf:Description rdf:about="http://example.org/basket">
+       <ex:hasFruit>
+           <rdf:Description>
+              <rdf:first rdf:resource="http://example.org/banana"/>
+              <rdf:rest>
+                 <rdf:Description>
+                    <rdf:first rdf:resource="http://example.org/apple"/>
+                    <rdf:rest>
+                        <rdf:Description>
+                            <rdf:first rdf:resource="http://example.org/pear"/>
+                            <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+                        </rdf:Description>
+                    </rdf:rest>
+                 </rdf:Description>
+              </rdf:rest>
+           </rdf:Description>
+       </ex:hasFruit>
+    </rdf:Description>
+</rdf:RDF>"###,
+        r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+    <rdf:Description rdf:about="http://example.org/basket">
+        <ex:hasFruit rdf:parseType="Collection">
+            <rdf:Description rdf:about="http://example.org/banana"/>
+            <rdf:Description rdf:about="http://example.org/apple"/>
+            <rdf:Description rdf:about="http://example.org/pear"/>
+        </ex:hasFruit>
+    </rdf:Description>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://purl.org/dc/elements/1.1/" => "dc",
+                    "http://example.org/stuff/1.0/" => "ex"
+                ]
+            )
+        ).unwrap();
+    }
+
+    #[test]
+    fn seq_longhand_with_type_declaration() {
+            xml_from_to(
+                r###"<?xml version="1.0"?>
+<rdf:RDF  xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+   <rdf:Description rdf:about="http://example.org/basket">
+       <ex:hasFruit>
+           <rdf:Description>
+              <rdf:type rdf:resource="http://example.org/fruitList"/>
+              <rdf:first rdf:resource="http://example.org/banana"/>
+              <rdf:rest>
+                 <rdf:Description>
+                    <rdf:type rdf:resource="http://example.org/fruitList"/>
+                    <rdf:first rdf:resource="http://example.org/apple"/>
+                    <rdf:rest>
+                        <rdf:Description>
+                            <rdf:type rdf:resource="http://example.org/fruitList"/>
+                            <rdf:first rdf:resource="http://example.org/pear"/>
+                            <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+                        </rdf:Description>
+                    </rdf:rest>
+                 </rdf:Description>
+              </rdf:rest>
+           </rdf:Description>
+       </ex:hasFruit>
+    </rdf:Description>
+</rdf:RDF>"###,
+                r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+    <rdf:Description rdf:about="http://example.org/basket">
+        <ex:hasFruit>
+            <fruitList xmlns="http://example.org/">
+                <rdf:first rdf:resource="http://example.org/banana"/>
+                <rdf:rest>
+                    <fruitList xmlns="http://example.org/">
+                        <rdf:first rdf:resource="http://example.org/apple"/>
+                        <rdf:rest>
+                            <fruitList xmlns="http://example.org/">
+                                <rdf:first rdf:resource="http://example.org/pear"/>
+                                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+                            </fruitList>
+                        </rdf:rest>
+                    </fruitList>
+                </rdf:rest>
+            </fruitList>
+        </ex:hasFruit>
+    </rdf:Description>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://purl.org/dc/elements/1.1/" => "dc",
+                    "http://example.org/stuff/1.0/" => "ex"
+                ]
+            )
+            ).unwrap();
+    }
+
+    /// I don't know if this is valid at all at the moment
+    /// nor what it should serialize as
+    #[test]
+    #[ignore]
+    fn seq_longhand_with_literal() {
+            xml_from_to(
+                r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+    <rdf:Description rdf:about="http://example.org/basket">
+        <ex:hasFruit rdf:parseType="Collection">
+            <rdf:Description rdf:about="http://example.org/banana">
+                 <rdf:value rdf:datatype="string">Yellow</rdf:value>
+            </rdf:Description>
+            <rdf:Description rdf:about="http://example.org/apple">
+                 <rdf:value>Red</rdf:value>
+            </rdf:Description>
+            <rdf:Description rdf:about="http://example.org/pear">
+                 <rdf:value>Green</rdf:value>
+            </rdf:Description>
+        </ex:hasFruit>
+    </rdf:Description>
+</rdf:RDF>"###,
+        r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:ex="http://example.org/stuff/1.0/">
+    <rdf:Description rdf:about="http://example.org/basket">
+        <ex:hasFruit rdf:parseType="Collection">
+            <rdf:Description rdf:about="http://example.org/banana"/>
+            <rdf:Description rdf:about="http://example.org/apple"/>
+            <rdf:Description rdf:about="http://example.org/pear"/>
+        </ex:hasFruit>
+    </rdf:Description>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://purl.org/dc/elements/1.1/" => "dc",
+                    "http://example.org/stuff/1.0/" => "ex"
+                ]
+            )
+        ).unwrap();
+    }
+
+    // Following Tests are all from specific bugs mostly found from developing horned-owl
     #[test]
     fn double_rdf_tag() {
         // Cut down from swrl_rule_basic test
@@ -1903,41 +2088,6 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
             Some(
                 indexmap![
                     "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
-                    "http://www.w3.org/2003/11/swrl#" => "swrl"
-                ]
-            )
-        ).unwrap()
-    }
-
-    #[test]
-    fn temp() {
-        xml_roundtrip(
-            r###"<?xml version="1.0" encoding="UTF-8"?>
-<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
-    <owl:Ontology rdf:about="http://www.example.com/iri">
-        <owl:versionIRI rdf:resource="http://www.example.com/viri"/>
-    </owl:Ontology>
-    <owl:Class rdf:about="http://www.example.com/iri#A"/>
-    <owl:Class rdf:about="http://www.example.com/iri#B"/>
-    <swrl:Variable rdf:about="http://www.example.com/iri#x"/>
-    <swrl:Imp>
-        <swrl:head>
-            <swrl:AtomList>
-                <rdf:first>
-                    <swrl:ClassAtom>
-                        <swrl:classPredicate rdf:resource="http://www.example.com/iri#B"/>
-                        <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
-                    </swrl:ClassAtom>
-                </rdf:first>
-                <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
-            </swrl:AtomList>
-        </swrl:head>
-    </swrl:Imp>
-</rdf:RDF>"###,
-            Some(
-                indexmap![
-                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
-                    "http://www.w3.org/2002/07/owl#" => "owl",
                     "http://www.w3.org/2003/11/swrl#" => "swrl"
                 ]
             )
@@ -2040,6 +2190,9 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
         ).unwrap()
     }
 
+    /// The bnode genid1 cannot be elided here when we render the
+    /// restriction even though it normally would be because of the
+    /// reference of it from annotatedTarget.
     #[test]
     fn non_elidable_bnode() {
         xml_roundtrip(
@@ -2058,6 +2211,54 @@ r###"<?xml version="1.0" encoding="UTF-8"?>
         <owl:annotatedTarget rdf:nodeID="genid1"/>
         <rdfs:comment xml:lang="en">Annotation on subclass axiom</rdfs:comment>
     </owl:Axiom>
+</rdf:RDF>"###,
+            Some(
+                indexmap![
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#" => "rdf",
+                    "http://www.w3.org/2000/01/rdf-schema#" => "rdfs",
+                    "http://www.w3.org/2002/07/owl#" => "owl",
+                    "http://www.w3.org/2003/11/swrl#" => "swrl"
+                ]
+            )
+        ).unwrap()
+    }
+
+    /// I think the problem here is that the type AtomList triple is being rendered as a short cut
+    /// and when this happens the object pull in is not happening
+    #[test]
+    #[ignore]
+    fn seq_with_pull_in_bnode() {
+        xml_roundtrip(
+    r###"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://www.example.com/iri#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+    <rdf:Description>
+        <rdf:type rdf:resource="http://www.w3.org/2003/11/swrl#Imp"/>
+        <swrl:body>
+            <rdf:Description>
+                <rdf:type rdf:resource="http://www.w3.org/2003/11/swrl#AtomList"/>
+                <rdf:first>
+                    <rdf:Description>
+                        <rdf:type rdf:resource="http://www.w3.org/2003/11/swrl#ClassAtom"/>
+                        <swrl:classPredicate rdf:resource="http://www.example.com/iri#A1"/>
+                        <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+                    </rdf:Description>
+                </rdf:first>
+                <rdf:rest>
+                    <rdf:Description>
+                        <rdf:type rdf:resource="http://www.w3.org/2003/11/swrl#AtomList"/>
+                        <rdf:first>
+                            <rdf:Description>
+                                <rdf:type rdf:resource="http://www.w3.org/2003/11/swrl#ClassAtom"/>
+                                <swrl:classPredicate rdf:resource="http://www.example.com/iri#A"/>
+                                <swrl:argument1 rdf:resource="http://www.example.com/iri#x"/>
+                            </rdf:Description>
+                        </rdf:first>
+                        <rdf:rest rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+                    </rdf:Description>
+                </rdf:rest>
+            </rdf:Description>
+        </swrl:body>
+     </rdf:Description>
 </rdf:RDF>"###,
             Some(
                 indexmap![
