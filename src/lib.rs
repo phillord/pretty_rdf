@@ -1357,6 +1357,18 @@ where
         chunk: &mut PChunk<A>,
     ) -> Result<(), io::Error> {
         chunk.remove(expanded);
+        self.format_removed_expanded(expanded, chunk)
+    }
+
+    /// Format an PExpandedTriple that we know has already been removed from the PChunk.
+    ///
+    /// This is needed over format_expanded because the removal runs
+    /// in linear time, so to be avoided if not necessary
+    fn format_removed_expanded(
+        &mut self,
+        expanded: &PExpandedTriple<A>,
+        chunk: &mut PChunk<A>,
+    ) -> Result<(), io::Error> {
         match expanded {
             PExpandedTriple::PMultiTriple(ref mt) => {
                 self.format_multi(mt, chunk)?;
@@ -1405,7 +1417,7 @@ where
                     }
                 }
 
-                self.format_expanded(&et, &mut chunk)?;
+                self.format_removed_expanded(&et, &mut chunk)?;
             } else {
                 break;
             }
