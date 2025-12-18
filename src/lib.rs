@@ -4,7 +4,7 @@ use quick_xml::{
     Writer,
 };
 
-use oxrdf::{BlankNodeRef, LiteralRef, NamedNodeRef, NamedOrBlankNodeRef, TermRef, TripleRef};
+use oxrdf::{BlankNodeRef, LiteralRef, Quad, QuadRef, NamedNodeRef, NamedOrBlankNodeRef, TermRef, TripleRef};
 use std::{
     self,
     cell::RefCell,
@@ -441,6 +441,22 @@ impl From<TripleRef<'_>> for PTriple<String> {
         }
     }
 }
+
+
+impl From<QuadRef<'_>> for PTriple<String> {
+    fn from(q: QuadRef<'_>) -> Self {
+        let t:TripleRef<'_> = q.into();
+        t.into()
+    }
+}
+
+impl From<Quad> for PTriple<String> {
+    fn from(q: Quad) -> Self {
+        q.as_ref().into()
+    }
+}
+
+
 
 // End basic RDF data model
 
@@ -1533,19 +1549,6 @@ mod test {
         ChunkedRdfXmlFormatter, ChunkedRdfXmlFormatterConfig, PBlankNode, PChunk, PExpandedTriple,
         PNamedNode, PTriple,
     };
-
-    impl From<QuadRef<'_>> for PTriple<String> {
-        fn from(q: QuadRef<'_>) -> Self {
-            let t:TripleRef<'_> = q.into();
-            t.into()
-        }
-    }
-
-    impl From<Quad> for PTriple<String> {
-        fn from(q: Quad) -> Self {
-            q.as_ref().into()
-        }
-    }
 
     fn tnn() -> PTriple<String> {
         PTriple {
