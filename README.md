@@ -3,7 +3,7 @@ Pretty RDF/XML
 
 This library allows writing of [XML
 RDF](https://www.w3.org/TR/rdf12-xml/). It is similar to the
-[Rio](https://github.com/oxigraph/rio) writer, however, unlike Rio, it
+[oxrdfio](https://github.com/oxigraph/oxrdfio) writer, however, unlike oxrdf, it
 is aimed at producing a readable syntax by taking the various
 shortcuts that the RDF specification provides for. So, for instance, this longer piece of RDF:
 
@@ -35,7 +35,6 @@ shortcuts that the RDF specification provides for. So, for instance, this longer
 
 will be shrunk using multiple property elements to this:
 
-
 ```
 <rdf:Description rdf:about="http://www.w3.org/TR/rdf-syntax-grammar">
   <ex:editor>
@@ -50,3 +49,12 @@ will be shrunk using multiple property elements to this:
   <dc:title>RDF 1.2 XML Syntax</dc:title>
 </rdf:Description>
 ```
+
+The library uses its own RDF data model which is similar to oxrdf but
+is, however, fully owned but generic. This library can therefore
+operate directly over, for example, `Rc<str>` without requiring
+conversion to `String` instances.
+
+There are also translators for the oxrdfio data model and
+WriterQuadSerializer meaning that this library can be used in a
+pluggable way to output any oxrdfio format.

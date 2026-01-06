@@ -1,10 +1,13 @@
+pub mod ox;
+
 use indexmap::IndexMap;
 use quick_xml::{
     events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event},
     Writer,
 };
 
-use oxrdf::{BlankNodeRef, LiteralRef, Quad, QuadRef, NamedNodeRef, NamedOrBlankNodeRef, TermRef, TripleRef};
+use oxrdf::{LiteralRef, NamedOrBlankNodeRef, TermRef, TripleRef};
+
 use std::{
     self,
     cell::RefCell,
@@ -51,6 +54,28 @@ fn map_err(error: quick_xml::Error) -> io::Error {
 }
 
 // Begin RDF data model
+
+// The RDF data model here is very similar to that in oxrdf and
+// originally rio. Re-implementing it rather than just reusing it adds
+// considerable complexity, so requires some explanation.
+
+// With Rio, all the entities were hard-coded to the type 'str. This
+// brings with it the cost of life time management which was likely to
+// create difficulties for both this library and horned-owl for which
+// I wrote this library.
+
+// I am guessing it is these difficulties that resulted in rio being
+// re-written to oxrdf, as this now contains duplicate data models,
+// one hardcoded to 'str and one owned String.
+
+// The second of these would fulfil my needs, however, requires a full
+// clone of all String instances, while Horned-OWL uses generics which
+// allow the use of smart pointers. My initial testing suggests moving
+// to String from AsRef<str> adds 20-30% overhead for large
+// serialisations.
+
+// So we are stuck with two nearly identical implementations.
+
 
 /// An RDF IRI
 #[derive(Ord, PartialOrd, Clone)]
@@ -132,21 +157,7 @@ impl<A: AsRef<str>> PNamedNode<A> {
 
 impl<A: AsRef<str>> fmt::Display for PNamedNode<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let nn: NamedNodeRef<'_> = self.into();
-        write!(f, "{}", nn)
-    }
-}
-
-impl<'a, A: AsRef<str>> From<&'a PNamedNode<A>> for NamedNodeRef<'a> {
-    fn from(arnn: &'a PNamedNode<A>) -> Self {
-        NamedNodeRef::new_unchecked(arnn.iri.as_ref())
-    }
-}
-
-impl From<NamedNodeRef<'_>> for PNamedNode<String> {
-    fn from(nn: NamedNodeRef<'_>) -> Self {
-        let iri: String = nn.as_str().to_string();
-        PNamedNode::new(iri)
+        write!(f, "<{}>", self.as_ref())
     }
 }
 
@@ -169,23 +180,7 @@ impl<A: AsRef<str>> PBlankNode<A> {
 
 impl<A: AsRef<str>> fmt::Display for PBlankNode<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let nn: BlankNodeRef<'_> = self.into();
-        write!(f, "{}", nn)
-    }
-}
-
-impl<'a, A: AsRef<str>> From<&'a PBlankNode<A>> for BlankNodeRef<'a> {
-    fn from(arbn: &'a PBlankNode<A>) -> Self {
-        // new_unchecked?
-        BlankNodeRef::new(arbn.id.as_ref()).unwrap()
-    }
-}
-
-impl From<BlankNodeRef<'_>> for PBlankNode<String> {
-    fn from(bn: BlankNodeRef<'_>) -> Self {
-        PBlankNode {
-            id: bn.as_str().to_string(),
-        }
+        write!(f, "{}", self.as_ref())
     }
 }
 
@@ -209,41 +204,6 @@ impl<A: AsRef<str>> fmt::Display for PLiteral<A> {
     }
 }
 
-impl<'a, A: AsRef<str>> From<&'a PLiteral<A>> for LiteralRef<'a> {
-    fn from(l: &'a PLiteral<A>) -> Self {
-        match l {
-            PLiteral::Simple { value } => LiteralRef::new_simple_literal(value.as_ref()),
-            PLiteral::LanguageTaggedString { value, language } => {
-                LiteralRef::new_language_tagged_literal_unchecked(value.as_ref(), language.as_ref())
-            }
-            PLiteral::Typed { value, datatype } => {
-                LiteralRef::new_typed_literal(value.as_ref(), datatype)
-            }
-        }
-    }
-}
-
-impl From<LiteralRef<'_>> for PLiteral<String> {
-    fn from(l: LiteralRef<'_>) -> Self {
-        if let Some(lang) = l.language() {
-            return PLiteral::LanguageTaggedString {
-                value: l.value().to_string(),
-                language: lang.to_string()
-            }
-        }
-
-        if l.datatype().as_str() == "http://www.w3.org/2001/XMLSchema#string" {
-            return PLiteral::Simple {
-                value: l.value().to_string()
-            }
-        }
-
-        return PLiteral::Typed {
-            value: l.value().to_string(),
-            datatype: l.datatype().into()
-        }
-    }
-}
 
 #[derive(Eq, PartialEq, Ord, PartialOrd, Debug, Clone, Hash)]
 pub enum PNamedOrBlankNode<A: AsRef<str>> {
@@ -255,24 +215,6 @@ impl<A: AsRef<str>> fmt::Display for PNamedOrBlankNode<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let nn: NamedOrBlankNodeRef<'_> = self.into();
         write!(f, "{}", nn)
-    }
-}
-
-impl<'a, A: AsRef<str>> From<&'a PNamedOrBlankNode<A>> for NamedOrBlankNodeRef<'a> {
-    fn from(anbn: &'a PNamedOrBlankNode<A>) -> Self {
-        match anbn {
-            PNamedOrBlankNode::NamedNode(nn) => NamedOrBlankNodeRef::NamedNode(nn.into()),
-            PNamedOrBlankNode::BlankNode(bn) => NamedOrBlankNodeRef::BlankNode(bn.into()),
-        }
-    }
-}
-
-impl From<NamedOrBlankNodeRef<'_>> for PNamedOrBlankNode<String> {
-    fn from(nbn: NamedOrBlankNodeRef<'_>) -> Self {
-        match nbn {
-            NamedOrBlankNodeRef::NamedNode(nn) => PNamedOrBlankNode::NamedNode(nn.into()),
-            NamedOrBlankNodeRef::BlankNode(bn) => PNamedOrBlankNode::BlankNode(bn.into()),
-        }
     }
 }
 
@@ -329,28 +271,8 @@ impl<A: AsRef<str>> From<PNamedOrBlankNode<A>> for PTerm<A> {
 
 impl<A: AsRef<str>> fmt::Display for PTerm<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let t: TermRef<'_> = self.into();
+        let t:TermRef<'_> = self.into();
         write!(f, "{}", t)
-    }
-}
-
-impl<'a, A: AsRef<str>> From<&'a PTerm<A>> for TermRef<'a> {
-    fn from(t: &'a PTerm<A>) -> Self {
-        match t {
-            PTerm::NamedNode(nn) => TermRef::NamedNode(nn.into()),
-            PTerm::BlankNode(bn) => TermRef::BlankNode(bn.into()),
-            PTerm::Literal(l) => TermRef::Literal(l.into()),
-        }
-    }
-}
-
-impl From<TermRef<'_>> for PTerm<String> {
-    fn from(t: TermRef<'_>) -> Self {
-        match t {
-            TermRef::NamedNode(nn) => PTerm::NamedNode(nn.into()),
-            TermRef::BlankNode(bn) => PTerm::BlankNode(bn.into()),
-            TermRef::Literal(l) => PTerm::Literal(l.into()),
-        }
     }
 }
 
@@ -421,42 +343,6 @@ impl<A: AsRef<str>> fmt::Display for PTriple<A> {
         write!(f, "{}", t)
     }
 }
-
-impl<'a, A: AsRef<str>> From<&'a PTriple<A>> for TripleRef<'a> {
-    fn from(t: &'a PTriple<A>) -> Self {
-        TripleRef {
-            subject: (&t.subject).into(),
-            predicate: (&t.predicate).into(),
-            object: (&t.object).into(),
-        }
-    }
-}
-
-impl From<TripleRef<'_>> for PTriple<String> {
-    fn from(t: TripleRef<'_>) -> Self {
-        PTriple {
-            subject: t.subject.into(),
-            predicate: t.predicate.into(),
-            object: t.object.into(),
-        }
-    }
-}
-
-
-impl From<QuadRef<'_>> for PTriple<String> {
-    fn from(q: QuadRef<'_>) -> Self {
-        let t:TripleRef<'_> = q.into();
-        t.into()
-    }
-}
-
-impl From<Quad> for PTriple<String> {
-    fn from(q: Quad) -> Self {
-        q.as_ref().into()
-    }
-}
-
-
 
 // End basic RDF data model
 
@@ -1463,7 +1349,7 @@ where
     }
 }
 
-pub trait RdfXmlFormatter<A: AsRef<str>, W> {
+pub trait RdfFormatter<A: AsRef<str>, W> {
     fn format(&mut self, triple: PTriple<A>) -> Result<(), io::Error>;
 
     fn finish(self) -> Result<W, io::Error>;
@@ -1491,7 +1377,7 @@ where
     }
 }
 
-impl<A: AsRef<str> + Clone + Debug + Eq + Hash, W: Write> RdfXmlFormatter<A, W>
+impl<A: AsRef<str> + Clone + Debug + Eq + Hash, W: Write> RdfFormatter<A, W>
     for PrettyRdfXmlFormatter<A, W>
 {
     fn format(&mut self, triple: PTriple<A>) -> Result<(), io::Error> {
@@ -1520,7 +1406,7 @@ where
     }
 }
 
-impl<A, W> RdfXmlFormatter<A, W> for NonPrettyRdfXmlFormatter<A, W>
+impl<A, W> RdfFormatter<A, W> for NonPrettyRdfXmlFormatter<A, W>
 where
     A: AsRef<str> + Clone + Debug + Eq + Hash,
     W: Write,
@@ -1541,7 +1427,7 @@ where
 mod test {
     use indexmap::{indexmap, IndexMap};
 
-    use oxrdf::{NamedNodeRef, Quad, QuadRef, TripleRef};
+    use oxrdf::{NamedNodeRef, TripleRef};
     use oxrdfio::RdfParser;
     use pretty_assertions::assert_eq;
 
