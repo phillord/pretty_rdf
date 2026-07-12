@@ -3,7 +3,7 @@ name = "pretty_rdf"
 version = "0.13.0"
 authors = ["Phillip Lord"]
 repository = "https://github.com/phillord/pretty_rdf"
-description = "RDF/XML Pretty Formatting"
+description = "RDF/XML Pretty Formatting (superseded by horned-owl's horned-pretty-rdf)"
 
 edition = "2018"
 license = "LGPL-3.0"

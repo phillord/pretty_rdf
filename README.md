@@ -1,6 +1,11 @@
 Pretty RDF/XML
 ==============
 
+**Note:** as of 2026-07-12, this crate's history has been absorbed
+into [horned-owl](https://github.com/phillord/horned-owl) as
+`horned-pretty-rdf`, where development now continues. This repository
+is kept for reference but is no longer the primary home of the code.
+
 This library allows writing of [XML
 RDF](https://www.w3.org/TR/rdf12-xml/). It is similar to the
 [oxrdfio](https://github.com/oxigraph/oxrdfio) writer, however, unlike oxrdf, it
